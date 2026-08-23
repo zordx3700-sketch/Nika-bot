@@ -1,370 +1,2189 @@
 import os
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
-from config import BOT_TOKEN, ADMIN_ID, MAIN_CHANNEL_ID, BACKUP_CHANNEL_ID, MAIN_CHANNEL_LINK, BACKUP_CHANNEL_LINK, TARGET_CHANNEL_ID
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.constants import ParseMode
+from telegram.error import (
+    TelegramError,
+    Forbidden,
+    BadRequest,
+    RetryAfter,
+)
+
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    ConversationHandler,
+    filters,
+)
+
+from config import (
+    BOT_TOKEN,
+    ADMIN_ID,
+    MAIN_CHANNEL_ID,
+    BACKUP_CHANNEL_ID,
+    MAIN_CHANNEL_LINK,
+    BACKUP_CHANNEL_LINK,
+    POSTER_CHANNEL_ID,
+    QUALITY_CHANNELS,
+    AVAILABLE_QUALITIES,
+)
+
 from database import DatabaseManager
 
-logging.basicConfig(level=logging.INFO)
 
-# --- Render Port Binding Fix ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
+# =====================================================
+# LOGGING
+# =====================================================
+
+logging.basicConfig(
+    format=(
+        "%(asctime)s | %(levelname)s | "
+        "%(name)s | %(message)s"
+    ),
+    level=logging.INFO,
+)
+
+logger = logging.getLogger("anime_bot")
+
+
+# =====================================================
+# RENDER HEALTH SERVER
+# =====================================================
+
+class HealthHandler(BaseHTTPRequestHandler):
+
     def do_GET(self):
         self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            "text/plain",
+        )
         self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+        self.wfile.write(
+            b"Anime Bot is running."
+        )
 
     def log_message(self, format, *args):
-        return  # Logs পরিষ্কার রাখার জন্য
+        return
 
-def run_health_check_server():
-    port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
-# -------------------------------
 
-# Conversation States
-ASK_NAME, ASK_POSTER, ASK_LANGS, ASK_SEASONS, ASK_EPS, ASK_RATING, ASK_EP_IDS = range(7)
-ASK_HELP_TEXT = 10
+def run_health_server():
+    port = int(
+        os.getenv("PORT", "8080")
+    )
 
-async def check_membership(bot, user_id: int) -> bool:
     try:
-        m1 = await bot.get_chat_member(chat_id=MAIN_CHANNEL_ID, user_id=user_id)
-        m2 = await bot.get_chat_member(chat_id=BACKUP_CHANNEL_ID, user_id=user_id)
-        valid = ['member', 'administrator', 'creator']
-        return m1.status in valid and m2.status in valid
+        server = HTTPServer(
+            ("0.0.0.0", port),
+            HealthHandler,
+        )
+
+        logger.info(
+            "Health server running on port %s",
+            port,
+        )
+
+        server.serve_forever()
+
     except Exception:
+        logger.exception(
+            "Health server stopped."
+        )
+
+
+# =====================================================
+# CONFIG VALIDATION
+# =====================================================
+
+def validate_environment():
+    required = {
+        "BOT_TOKEN": BOT_TOKEN,
+        "ADMIN_ID": ADMIN_ID,
+        "MAIN_CHANNEL_ID": MAIN_CHANNEL_ID,
+        "BACKUP_CHANNEL_ID": BACKUP_CHANNEL_ID,
+        "MAIN_CHANNEL_LINK": MAIN_CHANNEL_LINK,
+        "BACKUP_CHANNEL_LINK": BACKUP_CHANNEL_LINK,
+    }
+
+    missing = [
+        name
+        for name, value in required.items()
+        if not value
+    ]
+
+    if missing:
+        raise RuntimeError(
+            "Missing environment variables: "
+            + ", ".join(missing)
+        )
+
+
+# =====================================================
+# MEMBERSHIP
+# =====================================================
+
+async def check_membership(
+    bot,
+    user_id: int,
+) -> bool:
+
+    try:
+        main = await bot.get_chat_member(
+            MAIN_CHANNEL_ID,
+            user_id,
+        )
+
+        backup = await bot.get_chat_member(
+            BACKUP_CHANNEL_ID,
+            user_id,
+        )
+
+        valid = {
+            "member",
+            "administrator",
+            "creator",
+        }
+
+        return (
+            main.status in valid
+            and backup.status in valid
+        )
+
+    except TelegramError as e:
+        logger.warning(
+            "Membership check failed: %s",
+            e,
+        )
         return False
 
-# --- User Handlers ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    DatabaseManager.register_user(user_id)
-    
-    if not await check_membership(context.bot, user_id):
-        keyboard = [
-            [InlineKeyboardButton("Join Main Channel", url=MAIN_CHANNEL_LINK)],
-            [InlineKeyboardButton("Join Backup Channel", url=BACKUP_CHANNEL_LINK)],
-            [InlineKeyboardButton("Check Again 🔄", callback_data="verify_join")]
-        ]
-        text = "⚠️ Please join both channels to use the bot:"
+
+# =====================================================
+# KEYBOARDS
+# =====================================================
+
+def join_keyboard():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📢 Main Channel",
+                url=MAIN_CHANNEL_LINK,
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📢 Backup Channel",
+                url=BACKUP_CHANNEL_LINK,
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ Check Membership",
+                callback_data="verify",
+            )
+        ],
+    ])
+
+
+def main_menu():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔎 Search Anime",
+                callback_data="search",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📂 Anime List",
+                callback_data="list_0",
+            ),
+            InlineKeyboardButton(
+                "👤 My Details",
+                callback_data="my",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "ℹ️ Help",
+                callback_data="help",
+            ),
+        ],
+    ])
+
+
+def start_text(user):
+
+    name = user.first_name or "User"
+
+    return (
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "       🎬 ANIME HUB\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"Welcome, <b>{name}</b>! 👋\n\n"
+        "Search your favorite Anime and "
+        "choose Season, Quality, Language "
+        "and Episode.\n\n"
+        "✨ Premium Anime Experience"
+    )
+
+
+# =====================================================
+# START
+# =====================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    DatabaseManager.register_user(user)
+
+    if not await check_membership(
+        context.bot,
+        user.id,
+    ):
+
+        text = (
+            "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+            "       🔐 ACCESS REQUIRED\n"
+            "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            "Please join both official channels "
+            "to continue using Anime Hub."
+        )
+
         if update.callback_query:
-            await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=join_keyboard(),
+            )
         else:
-            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.message.reply_text(
+                text,
+                reply_markup=join_keyboard(),
+            )
+
         return
 
-    keyboard = [
-        [InlineKeyboardButton("🔎 Search Anime", callback_data="user_search")],
-        [InlineKeyboardButton("📂 Anime List", callback_data="user_list"), InlineKeyboardButton("ℹ️ Help", callback_data="user_help")]
-    ]
-    await update.message.reply_text(f"Welcome to the Anime Hub! Choose an option below or send an Anime name to search:", reply_markup=InlineKeyboardMarkup(keyboard))
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            start_text(user),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu(),
+        )
+    else:
+        await update.message.reply_text(
+            start_text(user),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu(),
+        )
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not await check_membership(context.bot, user_id):
-        await start_command(update, context)
+
+# =====================================================
+# SEARCH
+# =====================================================
+
+async def ask_search(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    await query.message.reply_text(
+        "🔎 <b>Search Anime</b>\n\n"
+        "Send the Anime name or keyword:",
+        parse_mode=ParseMode.HTML,
+    )
+
+    context.user_data["waiting_search"] = True
+
+
+async def handle_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    user = update.effective_user
+
+    if not await check_membership(
+        context.bot,
+        user.id,
+    ):
+        await start(update, context)
         return
 
-    query = update.message.text.strip()
-    anime, suggestions = DatabaseManager.search_anime(query)
+    text = update.message.text.strip()
+
+    # Admin conversation takes priority
+    if context.user_data.get("admin_state"):
+        return
+
+    DatabaseManager.register_user(user)
+
+    anime, suggestions = (
+        DatabaseManager.search_anime(text)
+    )
+
+    DatabaseManager.add_search_history(
+        user.id,
+        text,
+        anime["name"] if anime else None,
+    )
+
+    context.user_data["waiting_search"] = False
 
     if not anime:
-        sug_text = "\n".join([f"• {s}" for s in suggestions]) if suggestions else "No suggestions found."
-        await update.message.reply_text(f"❌ Anime not found!\n\nDid you mean:\n{sug_text}")
+
+        if suggestions:
+
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        f"🎬 {name}",
+                        callback_data=(
+                            "suggest:" +
+                            str(index)
+                        ),
+                    )
+                ]
+                for index, name in enumerate(
+                    suggestions
+                )
+            ]
+
+            context.user_data[
+                "suggestions"
+            ] = suggestions
+
+            buttons.append([
+                InlineKeyboardButton(
+                    "🔎 Search Again",
+                    callback_data="search",
+                )
+            ])
+
+            text_msg = (
+                "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+                "      ❌ NOT FOUND\n"
+                "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+                "Maybe you meant:"
+            )
+
+            await update.message.reply_text(
+                text_msg,
+                reply_markup=InlineKeyboardMarkup(
+                    buttons
+                ),
+            )
+
+        else:
+
+            await update.message.reply_text(
+                "❌ Anime not found.\n\n"
+                "Try another Anime name.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔎 Search Again",
+                            callback_data="search",
+                        )
+                    ]
+                ]),
+            )
+
         return
 
-    context.user_data['current_anime'] = anime
-    
-    try:
-        await context.bot.copy_message(chat_id=user_id, from_chat_id=TARGET_CHANNEL_ID, message_id=anime['poster_msg_id'])
-    except Exception:
-        pass
-
-    keyboard = []
-    langs = anime.get('languages', [])
-    if "Hindi" in langs: keyboard.append(InlineKeyboardButton("🇮🇳 Hindi", callback_data="ulang_Hindi"))
-    if "English" in langs: keyboard.append(InlineKeyboardButton("🇬🇧 English", callback_data="ulang_English"))
-    
-    markup = InlineKeyboardMarkup([keyboard])
-    await update.message.reply_text(f"🎬 *{anime['name']}*\n⭐ Rating: {anime.get('rating', 'N/A')}/10\n\nSelect Language:", parse_mode="Markdown", reply_markup=markup)
-
-async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    user_id = update.effective_user.id
-
-    if not data.startswith("admin_") and data != "verify_join" and not data.startswith("addlang_"):
-        if not await check_membership(context.bot, user_id):
-            await start_command(update, context)
-            return
-
-    if data == "verify_join":
-        await start_command(update, context)
-    
-    elif data == "user_search":
-        await query.message.reply_text("🔎 Type and send the Anime name in the chat.")
-    
-    elif data == "user_help":
-        help_text = DatabaseManager.get_help_text()
-        await query.message.reply_text(f"ℹ️ *Help & Support*\n\n{help_text}", parse_mode="Markdown")
-        
-    elif data == "user_list":
-        animes = DatabaseManager.get_all_animes()
-        if not animes:
-            await query.message.reply_text("List is empty.")
-            return
-        text = "📂 *Available Animes:*\n\n"
-        for a in animes:
-            text += f"• *{a['name']}* - {a.get('seasons', 1)} Seasons, {a.get('total_episodes', 0)} Eps (⭐ {a.get('rating', 'N/A')})\n"
-        await query.message.reply_text(text, parse_mode="Markdown")
-
-    elif data.startswith("ulang_"):
-        lang = data.split("_")[1]
-        context.user_data['sel_lang'] = lang
-        anime = context.user_data.get('current_anime')
-        seasons = anime.get('seasons', 1)
-        keyboard = [[InlineKeyboardButton(f"Season {s}", callback_data=f"useason_{s}")] for s in range(1, seasons + 1)]
-        await query.edit_message_text(f"Language: *{lang}*\n\nSelect Season:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data.startswith("useason_"):
-        season = data.split("_")[1]
-        context.user_data['sel_season'] = season
-        anime = context.user_data.get('current_anime')
-        total_eps = anime.get('total_episodes', 12)
-        
-        keyboard, row = [], []
-        for ep in range(1, total_eps + 1):
-            row.append(InlineKeyboardButton(f"Ep {ep}", callback_data=f"uep_{ep}"))
-            if len(row) == 4:
-                keyboard.append(row)
-                row = []
-        if row: keyboard.append(row)
-        await query.edit_message_text(f"Season {season} | {context.user_data.get('sel_lang')}\n\nSelect Episode:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data.startswith("uep_"):
-        ep_num = data.split("_")[1]
-        season = context.user_data.get('sel_season')
-        lang = context.user_data.get('sel_lang')
-        anime = context.user_data.get('current_anime')
-        
-        # Auto-Delete previous video
-        last_vid = context.user_data.get('last_video_msg_id')
-        if last_vid:
-            try:
-                await context.bot.delete_message(chat_id=user_id, message_id=last_vid)
-            except Exception:
-                pass
-
-        ep_msg_id = DatabaseManager.get_episode_msg_id(anime['key'], season, ep_num, lang)
-        if ep_msg_id:
-            try:
-                msg = await context.bot.copy_message(chat_id=user_id, from_chat_id=TARGET_CHANNEL_ID, message_id=ep_msg_id)
-                context.user_data['last_video_msg_id'] = msg.message_id
-            except Exception:
-                await query.answer("Error forwarding video. Please check channel permissions.", show_alert=True)
-        else:
-            await query.answer("Episode not found in database.", show_alert=True)
-
-# --- Admin Core ---
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    total = DatabaseManager.get_total_users()
-    keyboard = [
-        [InlineKeyboardButton("➕ Add Anime", callback_data="admin_add"), InlineKeyboardButton("🗑️ Delete Content", callback_data="admin_del")],
-        [InlineKeyboardButton("📜 Manage List", callback_data="user_list"), InlineKeyboardButton("ℹ️ Edit Help", callback_data="admin_edit_help")]
-    ]
-    await update.message.reply_text(f"🛠️ *Admin Dashboard*\nTotal Users: {total}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# --- Admin: Add Anime Flow ---
-async def admin_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.message.reply_text("Send the Anime Name/Key (e.g., Naruto):\nType /cancel to abort.")
-    return ASK_NAME
-
-async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['add_name'] = update.message.text.strip()
-    await update.message.reply_text("Send the Private Channel Message ID of the Poster:")
-    return ASK_POSTER
-
-async def ask_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['add_poster'] = int(update.message.text.strip())
-    keyboard = [
-        [InlineKeyboardButton("Add Hindi", callback_data="addlang_Hindi"), InlineKeyboardButton("Add English", callback_data="addlang_English")],
-        [InlineKeyboardButton("Done ✅", callback_data="addlang_done")]
-    ]
-    context.user_data['add_langs'] = []
-    await update.message.reply_text("Select available languages:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_LANGS
-
-async def handle_add_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    if data == "addlang_done":
-        await query.message.reply_text("How many Seasons does it have? (Send a number):")
-        return ASK_SEASONS
-    else:
-        lang = data.split("_")[1]
-        if lang not in context.user_data['add_langs']:
-            context.user_data['add_langs'].append(lang)
-            await query.answer(f"{lang} added!")
-        return ASK_LANGS
-
-async def ask_seasons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['add_seasons'] = int(update.message.text.strip())
-    await update.message.reply_text("How many total Episodes per season? (Send a number):")
-    return ASK_EPS
-
-async def ask_eps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['add_total_eps'] = int(update.message.text.strip())
-    await update.message.reply_text("What is the Rating? (e.g., 8.5):")
-    return ASK_RATING
-
-async def ask_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['add_rating'] = float(update.message.text.strip())
-    
-    # Save basic Anime data
-    DatabaseManager.add_anime_data(context.user_data['add_name'], {
-        'name': context.user_data['add_name'],
-        'poster_msg_id': context.user_data['add_poster'],
-        'languages': context.user_data['add_langs'],
-        'seasons': context.user_data['add_seasons'],
-        'total_episodes': context.user_data['add_total_eps'],
-        'rating': context.user_data['add_rating']
-    })
-    
-    # Setup loop for IDs
-    context.user_data['current_ep_setup'] = 1
-    lang_str = context.user_data['add_langs'][0] if context.user_data['add_langs'] else "Unknown"
-    context.user_data['setup_lang'] = lang_str
-    
-    await update.message.reply_text(f"Anime profile saved!\nNow, let's map Video IDs.\nSend Message ID for Season 1 - Episode 1 ({lang_str}):")
-    return ASK_EP_IDS
-
-async def ask_ep_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ep = context.user_data['current_ep_setup']
-    msg_id = int(update.message.text.strip())
-    
-    DatabaseManager.save_episode_mapping(
-        context.user_data['add_name'], 1, ep, context.user_data['setup_lang'], msg_id
+    await show_anime(
+        update,
+        context,
+        anime,
     )
-    
-    ep += 1
-    if ep > context.user_data['add_total_eps']:
-        await update.message.reply_text("✅ All episodes mapped successfully! Setup complete.")
-        return ConversationHandler.END
+
+
+# =====================================================
+# ANIME PROFILE
+# =====================================================
+
+async def show_anime(
+    update,
+    context,
+    anime,
+):
+
+    context.user_data[
+        "current_anime_id"
+    ] = anime["id"]
+
+    context.user_data[
+        "current_anime"
+    ] = anime
+
+    poster_message_id = anime.get(
+        "poster_message_id"
+    )
+
+    if (
+        poster_message_id
+        and POSTER_CHANNEL_ID
+    ):
+
+        try:
+            await context.bot.copy_message(
+                chat_id=update.effective_user.id,
+                from_chat_id=POSTER_CHANNEL_ID,
+                message_id=int(
+                    poster_message_id
+                ),
+            )
+        except TelegramError:
+            logger.warning(
+                "Could not copy poster."
+            )
+
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        f"      🎬 {anime['name']}\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"⭐ Rating: {anime.get('rating', 'N/A')}/10\n"
+        f"📚 Seasons: {anime.get('season_count', 1)}\n\n"
+        "Choose a Season:"
+    )
+
+    seasons = anime.get(
+        "season_count",
+        1,
+    )
+
+    buttons = []
+
+    for season in range(
+        1,
+        seasons + 1,
+    ):
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"📚 Season {season}",
+                callback_data=f"season:{season}",
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🔎 Search",
+            callback_data="search",
+        ),
+        InlineKeyboardButton(
+            "🔄 Start",
+            callback_data="start",
+        ),
+    ])
+
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        ),
+    )
+
+
+# =====================================================
+# QUALITY
+# =====================================================
+
+async def show_quality(
+    query,
+    context,
+    season: int,
+):
+
+    anime_id = context.user_data.get(
+        "current_anime_id"
+    )
+
+    if not anime_id:
+        await query.answer(
+            "Session expired. Search again.",
+            show_alert=True,
+        )
+        return
+
+    qualities = (
+        DatabaseManager
+        .get_available_qualities(
+            anime_id,
+            season,
+        )
+    )
+
+    if not qualities:
+
+        await query.answer(
+            "No quality is available.",
+            show_alert=True,
+        )
+        return
+
+    buttons = []
+
+    row = []
+
+    for quality in qualities:
+
+        row.append(
+            InlineKeyboardButton(
+                f"🎞 {quality}",
+                callback_data=(
+                    f"quality:{quality}"
+                ),
+            )
+        )
+
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+
+    if row:
+        buttons.append(row)
+
+    buttons.append([
+        InlineKeyboardButton(
+            "⬅️ Back",
+            callback_data="back_anime",
+        ),
+    ])
+
+    await query.edit_message_text(
+        "🎞 <b>Select Quality</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        ),
+    )
+
+
+# =====================================================
+# LANGUAGE
+# =====================================================
+
+async def show_languages(
+    query,
+    context,
+    quality: str,
+):
+
+    anime_id = context.user_data[
+        "current_anime_id"
+    ]
+
+    season = context.user_data[
+        "current_season"
+    ]
+
+    languages = (
+        DatabaseManager
+        .get_available_languages(
+            anime_id,
+            season,
+            quality,
+        )
+    )
+
+    if not languages:
+
+        await query.answer(
+            "No language is available.",
+            show_alert=True,
+        )
+        return
+
+    buttons = []
+
+    for language in languages:
+
+        icon = (
+            "🇮🇳"
+            if language == "Hindi"
+            else "🇬🇧"
+        )
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"{icon} {language}",
+                callback_data=(
+                    f"lang:{language}"
+                ),
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "⬅️ Back",
+            callback_data=f"season:"
+            f"{season}",
+        )
+    ])
+
+    await query.edit_message_text(
+        (
+            "🌐 <b>Select Language</b>\n\n"
+            f"Quality: <b>{quality}</b>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        ),
+    )
+
+
+# =====================================================
+# EPISODE LIST
+# =====================================================
+
+EPISODES_PER_PAGE = 8
+
+
+async def show_episodes(
+    query,
+    context,
+    page: int = 0,
+):
+
+    anime_id = context.user_data[
+        "current_anime_id"
+    ]
+
+    season = context.user_data[
+        "current_season"
+    ]
+
+    quality = context.user_data[
+        "current_quality"
+    ]
+
+    language = context.user_data[
+        "current_language"
+    ]
+
+    count = (
+        DatabaseManager
+        .get_episode_count(
+            anime_id,
+            season,
+            quality,
+            language,
+        )
+    )
+
+    if count <= 0:
+
+        await query.edit_message_text(
+            "❌ No episodes are available "
+            "for this selection."
+        )
+        return
+
+    context.user_data[
+        "episode_page"
+    ] = page
+
+    start = page * EPISODES_PER_PAGE + 1
+
+    end = min(
+        start + EPISODES_PER_PAGE - 1,
+        count,
+    )
+
+    buttons = []
+
+    row = []
+
+    for ep in range(start, end + 1):
+
+        row.append(
+            InlineKeyboardButton(
+                f"Episode {ep:02d}",
+                callback_data=f"episode:{ep}",
+            )
+        )
+
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+
+    if row:
+        buttons.append(row)
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ Previous",
+                callback_data=f"episodes:{page - 1}",
+            )
+        )
+
+    if end < count:
+        navigation.append(
+            InlineKeyboardButton(
+                "Next ➡️",
+                callback_data=f"episodes:{page + 1}",
+            )
+        )
+
+    if navigation:
+        buttons.append(navigation)
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🔎 Search",
+            callback_data="search",
+        ),
+        InlineKeyboardButton(
+            "🔄 Start",
+            callback_data="start",
+        ),
+    ])
+
+    anime = context.user_data[
+        "current_anime"
+    ]
+
+    text = (
+        f"🎬 <b>{anime['name']}</b>\n"
+        f"📚 Season {season}\n"
+        f"🎞 {quality} • 🌐 {language}\n\n"
+        f"<b>Episodes {start}–{end}</b>"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        ),
+    )
+
+
+# =====================================================
+# EPISODE OPEN
+# =====================================================
+
+async def open_episode(
+    query,
+    context,
+    episode: int,
+):
+
+    anime = context.user_data.get(
+        "current_anime"
+    )
+
+    anime_id = context.user_data[
+        "current_anime_id"
+    ]
+
+    season = context.user_data[
+        "current_season"
+    ]
+
+    quality = context.user_data[
+        "current_quality"
+    ]
+
+    language = context.user_data[
+        "current_language"
+    ]
+
+    mapping = (
+        DatabaseManager
+        .get_episode_mapping(
+            anime_id,
+            season,
+            episode,
+            quality,
+            language,
+        )
+    )
+
+    if not mapping:
+
+        await query.answer(
+            "Episode is not available.",
+            show_alert=True,
+        )
+        return
+
+    user_id = query.from_user.id
+
+    previous = context.user_data.get(
+        "last_episode_message_id"
+    )
+
+    if previous:
+
+        try:
+            await context.bot.delete_message(
+                chat_id=user_id,
+                message_id=previous,
+            )
+        except TelegramError:
+            pass
+
+    try:
+
+        copied = await context.bot.copy_message(
+            chat_id=user_id,
+            from_chat_id=int(
+                mapping["channel_id"]
+            ),
+            message_id=int(
+                mapping["message_id"]
+            ),
+        )
+
+        context.user_data[
+            "last_episode_message_id"
+        ] = copied.message_id
+
+    except TelegramError as e:
+
+        logger.error(
+            "Episode copy failed: %s",
+            e,
+        )
+
+        await query.answer(
+            "Unable to load this episode.",
+            show_alert=True,
+        )
+
+        return
+
+    DatabaseManager.add_episode_history(
+        user_id,
+        anime["name"],
+        season,
+        episode,
+        quality,
+        language,
+    )
+
+    await query.answer(
+        f"Episode {episode} loaded."
+    )
+
+    # Navigation message
+    buttons = []
+
+    if episode > 1:
+        buttons.append(
+            InlineKeyboardButton(
+                "⬅️ Previous",
+                callback_data=(
+                    f"episode:"
+                    f"{episode - 1}"
+                ),
+            )
+        )
+
+    buttons.append(
+        InlineKeyboardButton(
+            "📋 Episodes",
+            callback_data=(
+                f"episodes:"
+                f"{context.user_data.get('episode_page', 0)}"
+            ),
+        )
+    )
+
+    if episode < (
+        DatabaseManager.get_episode_count(
+            anime_id,
+            season,
+            quality,
+            language,
+        )
+    ):
+        buttons.append(
+            InlineKeyboardButton(
+                "Next ➡️",
+                callback_data=(
+                    f"episode:"
+                    f"{episode + 1}"
+                ),
+            )
+        )
+
+    await query.message.reply_text(
+        (
+            f"🎬 <b>{anime['name']}</b>\n"
+            f"📚 Season {season}\n"
+            f"🎞 Episode {episode}\n"
+            f"📺 {quality} • {language}"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            buttons,
+            [
+                InlineKeyboardButton(
+                    "🔎 Search",
+                    callback_data="search",
+                ),
+                InlineKeyboardButton(
+                    "🔄 Start",
+                    callback_data="start",
+                ),
+            ],
+        ]),
+    )
+
+
+# =====================================================
+# MY DETAILS
+# =====================================================
+
+async def show_my_details(
+    query,
+    context,
+):
+
+    user = DatabaseManager.get_user(
+        query.from_user.id
+    )
+
+    if not user:
+
+        await query.answer(
+            "No user information found.",
+            show_alert=True,
+        )
+        return
+
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "        👤 MY DETAILS\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👤 Name: "
+        f"{user.get('first_name', '')}\n"
+        f"🔗 Username: "
+        f"@{user.get('username', '') if user.get('username') else 'N/A'}\n"
+        f"🆔 Telegram ID: "
+        f"{user.get('telegram_id')}\n\n"
+        f"🔎 Total Searches: "
+        f"{user.get('total_searches', 0)}\n"
+        f"🎬 Episodes Opened: "
+        f"{user.get('total_episode_opens', 0)}"
+    )
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔎 Search History",
+                    callback_data="history_search",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎬 Episode History",
+                    callback_data="history_episode",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Main Menu",
+                    callback_data="start",
+                ),
+            ],
+        ]),
+    )
+
+
+async def show_search_history(
+    query,
+    context,
+):
+
+    data = DatabaseManager.get_search_history(
+        query.from_user.id
+    )
+
+    if not data:
+
+        text = "🔎 No search history yet."
+
     else:
-        context.user_data['current_ep_setup'] = ep
-        await update.message.reply_text(f"Send Message ID for Season 1 - Episode {ep} ({context.user_data['setup_lang']}):")
-        return ASK_EP_IDS
 
-# --- Admin: Delete Flow ---
-async def admin_del_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        lines = [
+            "🔎 <b>Search History</b>\n"
+        ]
+
+        for item in data[:20]:
+
+            anime = (
+                item.get("anime_name")
+                or "Not Found"
+            )
+
+            keyword = item.get(
+                "keyword",
+                "",
+            )
+
+            lines.append(
+                f"• <b>{keyword}</b> → {anime}"
+            )
+
+        text = "\n".join(lines)
+
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "⬅️ My Details",
+                    callback_data="my",
+                )
+            ]
+        ]),
+    )
+
+
+async def show_episode_history(
+    query,
+    context,
+):
+
+    data = DatabaseManager.get_episode_history(
+        query.from_user.id
+    )
+
+    if not data:
+
+        text = "🎬 No episode history yet."
+
+    else:
+
+        lines = [
+            "🎬 <b>Episode History</b>\n"
+        ]
+
+        for item in data[:30]:
+
+            lines.append(
+                f"• {item.get('anime_name')} "
+                f"S{item.get('season')} "
+                f"E{item.get('episode')} "
+                f"({item.get('quality')} "
+                f"{item.get('language')})"
+            )
+
+        text = "\n".join(lines)
+
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "⬅️ My Details",
+                    callback_data="my",
+                )
+            ]
+        ]),
+    )
+
+
+# =====================================================
+# ANIME LIST
+# =====================================================
+
+async def show_anime_list(
+    query,
+    page: int = 0,
+):
+
     animes = DatabaseManager.get_all_animes()
-    keyboard = [[InlineKeyboardButton(a['name'], callback_data=f"del1_{a['key']}")] for a in animes]
-    await update.callback_query.message.reply_text("Select Anime to Manage/Delete:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def del_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not animes:
+
+        await query.edit_message_text(
+            "📂 Anime List is empty.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back",
+                        callback_data="start",
+                    )
+                ]
+            ]),
+        )
+
+        return
+
+    per_page = 8
+
+    start = page * per_page
+    end = start + per_page
+
+    current = animes[start:end]
+
+    buttons = []
+
+    for anime in current:
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"🎬 {anime['name']}",
+                callback_data=(
+                    f"listanime:{anime['id']}"
+                ),
+            )
+        ])
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ Previous",
+                callback_data=f"list:{page - 1}",
+            )
+        )
+
+    if end < len(animes):
+        navigation.append(
+            InlineKeyboardButton(
+                "Next ➡️",
+                callback_data=f"list:{page + 1}",
+            )
+        )
+
+    if navigation:
+        buttons.append(navigation)
+
+    buttons.append([
+        InlineKeyboardButton(
+            "⬅️ Main Menu",
+            callback_data="start",
+        )
+    ])
+
+    await query.edit_message_text(
+        "📂 <b>Available Anime</b>\n\n"
+        "Select an Anime:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        ),
+    )
+
+
+# =====================================================
+# ADMIN
+# =====================================================
+
+def is_admin(user_id: int):
+    return user_id == ADMIN_ID
+
+
+async def admin_panel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        await update.message.reply_text(
+            "⛔ Access denied."
+        )
+        return
+
+    total = DatabaseManager.get_total_users()
+
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "       🛠 ADMIN PANEL\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👥 Total Users: <b>{total}</b>\n\n"
+        "Choose an action:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "➕ Add Anime",
+                callback_data="admin:add",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎞 Add Episode",
+                callback_data="admin:episode",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "✏️ Edit Anime",
+                callback_data="admin:edit",
+            ),
+            InlineKeyboardButton(
+                "🗑 Delete Anime",
+                callback_data="admin:delete",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔑 Keywords",
+                callback_data="admin:keywords",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "👥 Users",
+                callback_data="admin:users",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "ℹ️ Edit Help",
+                callback_data="admin:help",
+            ),
+        ],
+    ]
+
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
+    )
+
+
+# =====================================================
+# ADMIN ADD ANIME CONVERSATION
+# =====================================================
+
+(
+    A_NAME,
+    A_POSTER,
+    A_RATING,
+    A_SEASONS,
+    A_EPISODES,
+    A_KEYWORDS,
+) = range(6)
+
+
+async def admin_add_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return ConversationHandler.END
+
+    await update.callback_query.answer()
+
+    context.user_data[
+        "admin_state"
+    ] = "add_anime"
+
+    await update.callback_query.message.reply_text(
+        "➕ <b>Add Anime</b>\n\n"
+        "Send Anime name:",
+        parse_mode=ParseMode.HTML,
+    )
+
+    return A_NAME
+
+
+async def admin_add_name(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    context.user_data[
+        "add_name"
+    ] = update.message.text.strip()
+
+    await update.message.reply_text(
+        "Send Poster Message ID.\n\n"
+        "The poster must exist in POSTER_CHANNEL_ID."
+    )
+
+    return A_POSTER
+
+
+async def admin_add_poster(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    try:
+        poster = int(
+            update.message.text.strip()
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Message ID must be a number."
+        )
+        return A_POSTER
+
+    context.user_data[
+        "add_poster"
+    ] = poster
+
+    await update.message.reply_text(
+        "Send Rating.\n\n"
+        "Example: 8.5"
+    )
+
+    return A_RATING
+
+
+async def admin_add_rating(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    try:
+        rating = float(
+            update.message.text.strip()
+        )
+
+        if not 0 <= rating <= 10:
+            raise ValueError
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ Rating must be between 0 and 10."
+        )
+
+        return A_RATING
+
+    context.user_data[
+        "add_rating"
+    ] = rating
+
+    await update.message.reply_text(
+        "How many Seasons?\n\n"
+        "Example: 3"
+    )
+
+    return A_SEASONS
+
+
+async def admin_add_seasons(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    try:
+
+        seasons = int(
+            update.message.text.strip()
+        )
+
+        if seasons < 1 or seasons > 100:
+            raise ValueError
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ Enter a valid season count."
+        )
+
+        return A_SEASONS
+
+    context.user_data[
+        "add_seasons"
+    ] = seasons
+
+    await update.message.reply_text(
+        "Send episode count for each season.\n\n"
+        "Example for 3 seasons:\n"
+        "12,24,13"
+    )
+
+    return A_EPISODES
+
+
+async def admin_add_episodes(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    raw = update.message.text.strip()
+
+    try:
+
+        values = [
+            int(x.strip())
+            for x in raw.split(",")
+        ]
+
+        seasons = context.user_data[
+            "add_seasons"
+        ]
+
+        if len(values) != seasons:
+            raise ValueError
+
+        if any(x < 1 for x in values):
+            raise ValueError
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ Enter exactly one episode "
+            "count for each season.\n\n"
+            "Example:\n"
+            "12,24,13"
+        )
+
+        return A_EPISODES
+
+    context.user_data[
+        "add_episode_counts"
+    ] = values
+
+    await update.message.reply_text(
+        "Enter search keywords/aliases separated "
+        "by commas.\n\n"
+        "Example:\n"
+        "naruto,naruto anime,nrt"
+    )
+
+    return A_KEYWORDS
+
+
+async def admin_add_keywords(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    keywords = [
+        x.strip()
+        for x in update.message.text.split(",")
+        if x.strip()
+    ]
+
+    try:
+
+        anime_id = DatabaseManager.add_anime(
+            name=context.user_data[
+                "add_name"
+            ],
+            rating=context.user_data[
+                "add_rating"
+            ],
+            poster_message_id=context.user_data[
+                "add_poster"
+            ],
+            season_count=context.user_data[
+                "add_seasons"
+            ],
+            episodes_per_season=context.user_data[
+                "add_episode_counts"
+            ],
+            keywords=keywords,
+        )
+
+    except ValueError as e:
+
+        await update.message.reply_text(
+            f"❌ {e}"
+        )
+
+        context.user_data.pop(
+            "admin_state",
+            None,
+        )
+
+        return ConversationHandler.END
+
+    context.user_data.pop(
+        "admin_state",
+        None,
+    )
+
+    await update.message.reply_text(
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "      ✅ ANIME ADDED\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"🎬 {context.user_data.get('add_name')}\n\n"
+        f"Anime ID:\n<code>{anime_id}</code>\n\n"
+        "Now use <b>🎞 Add Episode</b> "
+        "to map every Episode's Telegram "
+        "Message ID.",
+        parse_mode=ParseMode.HTML,
+    )
+
+    return ConversationHandler.END
+
+
+async def cancel_admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    context.user_data.pop(
+        "admin_state",
+        None,
+    )
+
+    await update.message.reply_text(
+        "❌ Operation cancelled."
+    )
+
+    return ConversationHandler.END
+
+
+# =====================================================
+# CALLBACK ROUTER
+# =====================================================
+
+async def callbacks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
     query = update.callback_query
     data = query.data
-    
-    if data.startswith("del1_"):
-        key = data.split("_")[1]
-        keyboard = [
-            [InlineKeyboardButton("🇮🇳 Delete Hindi", callback_data=f"del2_{key}_Hindi")],
-            [InlineKeyboardButton("🇬🇧 Delete English", callback_data=f"del2_{key}_English")],
-            [InlineKeyboardButton("❌ Delete Entire Anime", callback_data=f"del_all_{key}")]
+
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    # -------------------------------------------------
+    # Membership verification
+    # -------------------------------------------------
+
+    if data == "verify":
+
+        if await check_membership(
+            context.bot,
+            user_id,
+        ):
+
+            await query.edit_message_text(
+                start_text(query.from_user),
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_menu(),
+            )
+
+        else:
+
+            await query.edit_message_text(
+                "❌ You have not joined both "
+                "channels yet.\n\n"
+                "Join both channels and try again.",
+                reply_markup=join_keyboard(),
+            )
+
+        return
+
+    # -------------------------------------------------
+    # Start
+    # -------------------------------------------------
+
+    if data == "start":
+
+        if not await check_membership(
+            context.bot,
+            user_id,
+        ):
+            await query.edit_message_text(
+                "🔐 Please join both channels first.",
+                reply_markup=join_keyboard(),
+            )
+            return
+
+        context.user_data.clear()
+
+        await query.edit_message_text(
+            start_text(query.from_user),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu(),
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Protected callbacks
+    # -------------------------------------------------
+
+    if not await check_membership(
+        context.bot,
+        user_id,
+    ):
+
+        await query.edit_message_text(
+            "🔐 Please join both channels first.",
+            reply_markup=join_keyboard(),
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Search
+    # -------------------------------------------------
+
+    if data == "search":
+
+        context.user_data[
+            "waiting_search"
+        ] = True
+
+        await query.edit_message_text(
+            "🔎 <b>Search Anime</b>\n\n"
+            "Send the Anime name or keyword:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔄 Cancel",
+                        callback_data="start",
+                    )
+                ]
+            ]),
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Help
+    # -------------------------------------------------
+
+    if data == "help":
+
+        help_text = (
+            DatabaseManager.get_help()
+        )
+
+        await query.edit_message_text(
+            (
+                "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+                "        ℹ️ HELP\n"
+                "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+                f"{help_text}"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Main Menu",
+                        callback_data="start",
+                    )
+                ]
+            ]),
+        )
+
+        return
+
+    # -------------------------------------------------
+    # My Details
+    # -------------------------------------------------
+
+    if data == "my":
+
+        await show_my_details(
+            query,
+            context,
+        )
+
+        return
+
+    if data == "history_search":
+
+        await show_search_history(
+            query,
+            context,
+        )
+
+        return
+
+    if data == "history_episode":
+
+        await show_episode_history(
+            query,
+            context,
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Anime List
+    # -------------------------------------------------
+
+    if data.startswith("list_"):
+
+        page = int(
+            data.split("_")[1]
+        )
+
+        await show_anime_list(
+            query,
+            page,
+        )
+
+        return
+
+    if data.startswith("listanime:"):
+
+        anime_id = data.split(
+            ":",
+            1,
+        )[1]
+
+        anime = DatabaseManager.get_anime(
+            anime_id
+        )
+
+        if not anime:
+
+            await query.answer(
+                "Anime not found.",
+                show_alert=True,
+            )
+
+            return
+
+        context.user_data[
+            "current_anime_id"
+        ] = anime_id
+
+        context.user_data[
+            "current_anime"
+        ] = anime
+
+        seasons = anime.get(
+            "season_count",
+            1,
+        )
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"📚 Season {s}",
+                    callback_data=f"season:{s}",
+                )
+            ]
+            for s in range(
+                1,
+                seasons + 1,
+            )
         ]
-        await query.edit_message_text(f"Manage deletion for {key}:", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    elif data.startswith("del_all_"):
-        key = data.split("_")[2]
-        DatabaseManager.delete_entire_anime(key)
-        await query.edit_message_text(f"✅ {key} has been completely deleted.")
-        
-    elif data.startswith("del2_"):
-        parts = data.split("_")
-        key, lang = parts[1], parts[2]
-        keyboard = [
-            [InlineKeyboardButton(f"🗑️ Delete All {lang} Episodes", callback_data=f"del_langall_{key}_{lang}")],
-            [InlineKeyboardButton("🗑️ Delete Specific Episode", callback_data=f"del3_{key}_{lang}")]
+
+        buttons.append([
+            InlineKeyboardButton(
+                "⬅️ Anime List",
+                callback_data="list:0",
+            )
+        ])
+
+        await query.edit_message_text(
+            (
+                f"🎬 <b>{anime['name']}</b>\n\n"
+                f"⭐ Rating: "
+                f"{anime.get('rating', 'N/A')}/10\n"
+                f"📚 Seasons: {seasons}\n\n"
+                "Select Season:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                buttons
+            ),
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Suggestions
+    # -------------------------------------------------
+
+    if data.startswith("suggest:"):
+
+        index = int(
+            data.split(":")[1]
+        )
+
+        suggestions = context.user_data.get(
+            "suggestions",
+            [],
+        )
+
+        if index >= len(suggestions):
+            return
+
+        anime, _ = (
+            DatabaseManager.search_anime(
+                suggestions[index]
+            )
+        )
+
+        if anime:
+
+            # Send profile as a fresh message
+            await query.message.reply_text(
+                (
+                    f"🎬 <b>{anime['name']}</b>\n\n"
+                    f"⭐ Rating: "
+                    f"{anime.get('rating', 'N/A')}/10\n"
+                    f"📚 Seasons: "
+                    f"{anime.get('season_count', 1)}"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "▶️ Select",
+                            callback_data=(
+                                f"listanime:{anime['id']}"
+                            ),
+                        )
+                    ]
+                ]),
+            )
+
+        return
+
+    # -------------------------------------------------
+    # Season
+    # -------------------------------------------------
+
+    if data.startswith("season:"):
+
+        season = int(
+            data.split(":")[1]
+        )
+
+        context.user_data[
+            "current_season"
+        ] = season
+
+        await show_quality(
+            query,
+            context,
+            season,
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Quality
+    # -------------------------------------------------
+
+    if data.startswith("quality:"):
+
+        quality = data.split(
+            ":",
+            1,
+        )[1]
+
+        if quality not in AVAILABLE_QUALITIES:
+            return
+
+        context.user_data[
+            "current_quality"
+        ] = quality
+
+        await show_languages(
+            query,
+            context,
+            quality,
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Language
+    # -------------------------------------------------
+
+    if data.startswith("lang:"):
+
+        language = data.split(
+            ":",
+            1,
+        )[1]
+
+        if language not in [
+            "Hindi",
+            "English",
+        ]:
+            return
+
+        context.user_data[
+            "current_language"
+        ] = language
+
+        await show_episodes(
+            query,
+            context,
+            page=0,
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Episodes pagination
+    # -------------------------------------------------
+
+    if data.startswith("episodes:"):
+
+        page = int(
+            data.split(":")[1]
+        )
+
+        await show_episodes(
+            query,
+            context,
+            page,
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Episode
+    # -------------------------------------------------
+
+    if data.startswith("episode:"):
+
+        episode = int(
+            data.split(":")[1]
+        )
+
+        await open_episode(
+            query,
+            context,
+            episode,
+        )
+
+        return
+
+    # -------------------------------------------------
+    # Back to anime
+    # -------------------------------------------------
+
+    if data == "back_anime":
+
+        anime = context.user_data.get(
+            "current_anime"
+        )
+
+        if not anime:
+            return
+
+        seasons = anime.get(
+            "season_count",
+            1,
+        )
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"📚 Season {s}",
+                    callback_data=f"season:{s}",
+                )
+            ]
+            for s in range(
+                1,
+                seasons + 1,
+            )
         ]
-        await query.edit_message_text(f"Language: {lang}\nChoose action:", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    elif data.startswith("del_langall_"):
-        parts = data.split("_")
-        key, lang = parts[2], parts[3]
-        DatabaseManager.delete_language_data(key, lang)
-        await query.edit_message_text(f"✅ {lang} data for {key} deleted.")
-        
-    elif data.startswith("del3_"):
-        parts = data.split("_")
-        key, lang = parts[1], parts[2]
-        # Allow deleting up to Ep 10 for simplicity in inline menu
-        keyboard = [[InlineKeyboardButton(f"Ep {i}", callback_data=f"del4_{key}_{lang}_1_{i}")] for i in range(1, 11)]
-        await query.edit_message_text("Select Episode to Delete:", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    elif data.startswith("del4_"):
-        parts = data.split("_")
-        key, lang, season, ep = parts[1], parts[2], parts[3], parts[4]
-        DatabaseManager.delete_single_episode(key, season, ep, lang)
-        await query.edit_message_text(f"✅ Season {season} Ep {ep} ({lang}) deleted.")
 
-# --- Admin: Edit Help Flow ---
-async def admin_help_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.message.reply_text("Send the new Help Text / Support ID (or /cancel to abort):")
-    return ASK_HELP_TEXT
+        await query.edit_message_text(
+            f"🎬 <b>{anime['name']}</b>\n\n"
+            "Select Season:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                buttons
+            ),
+        )
 
-async def save_help_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    DatabaseManager.set_help_text(text)
-    await update.message.reply_text("✅ Help info updated successfully!")
-    return ConversationHandler.END
+        return
 
-async def cancel_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Process cancelled.")
-    return ConversationHandler.END
+
+# =====================================================
+# ERROR HANDLER
+# =====================================================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    error = context.error
+
+    logger.error(
+        "Unhandled exception: %s",
+        error,
+    )
+
+
+# =====================================================
+# MAIN
+# =====================================================
 
 def main():
-    # Start Health Check Server in background thread for Render
-    threading.Thread(target=run_health_check_server, daemon=True).start()
-    
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    add_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_add_start, pattern="^admin_add$")],
+
+    validate_environment()
+
+    DatabaseManager.init()
+
+    threading.Thread(
+        target=run_health_server,
+        daemon=True,
+    ).start()
+
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # ---------------------------------------------
+    # ADD ANIME CONVERSATION
+    # ---------------------------------------------
+
+    add_anime_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                admin_add_start,
+                pattern=r"^admin:add$",
+            )
+        ],
+
         states={
-            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
-            ASK_POSTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_poster)],
-            ASK_LANGS: [CallbackQueryHandler(handle_add_lang, pattern="^addlang_")],
-            ASK_SEASONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_seasons)],
-            ASK_EPS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_eps)],
-            ASK_RATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_rating)],
-            ASK_EP_IDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_ep_ids)],
+
+            A_NAME: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_add_name,
+                )
+            ],
+
+            A_POSTER: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_add_poster,
+                )
+            ],
+
+            A_RATING: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_add_rating,
+                )
+            ],
+
+            A_SEASONS: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_add_seasons,
+                )
+            ],
+
+            A_EPISODES: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_add_episodes,
+                )
+            ],
+
+            A_KEYWORDS: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_add_keywords,
+                )
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_setup)]
+
+        fallbacks=[
+            CommandHandler(
+                "cancel",
+                cancel_admin,
+            )
+        ],
+
+        per_user=True,
+        per_chat=True,
     )
 
-    help_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_help_start, pattern="^admin_edit_help$")],
-        states={ASK_HELP_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_help_text)]},
-        fallbacks=[CommandHandler("cancel", cancel_setup)]
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start,
+        )
     )
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    
-    app.add_handler(add_conv)
-    app.add_handler(help_conv)
-    
-    app.add_handler(CallbackQueryHandler(del_callback, pattern="^del"))
-    app.add_handler(CallbackQueryHandler(user_callback))
-    
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    print("Bot is up and running...")
-    app.run_polling()
+    app.add_handler(
+        CommandHandler(
+            "admin",
+            admin_panel,
+        )
+    )
 
-if __name__ == '__main__':
+    app.add_handler(
+        add_anime_conv
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            callbacks
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND,
+            handle_text,
+        )
+    )
+
+    app.add_error_handler(
+        error_handler
+    )
+
+    logger.info(
+        "Anime Bot is starting..."
+    )
+
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
+
+
+if __name__ == "__main__":
     main()
