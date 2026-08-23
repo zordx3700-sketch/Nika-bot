@@ -1,132 +1,230 @@
-import base64
-import json
-import logging
+"""
+Telegram Bot Production Configuration Module.
+
+Compatible with:
+- Python: 3.11+
+- python-telegram-bot: >=22.0, <23.0
+- firebase-admin: >=6.5.0
+- Render deployment environment
+
+All sensitive parameters are dynamically loaded and validated from environment variables.
+"""
+
 import os
-from typing import Any, Dict, List, Optional
+import sys
+import json
+import base64
+import logging
+from typing import Any, Dict, Optional
+from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except ImportError:
+    pass
+
+# Setup logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger("Config")
 
 
-def get_str_env(key: str, default: Optional[str] = None) -> Optional[str]:
+def get_str(key: str, default: Optional[str] = None, required: bool = True) -> str:
     """
-    Safely retrieve a string environment variable.
-    Strips leading/trailing whitespace if the value exists.
+    Retrieve a string environment variable.
+
+    :param key: Environment variable name
+    :param default: Optional default fallback value
+    :param required: Whether this variable is strictly required
+    :return: String value
+    :raises ValueError: If variable is required and not present or empty
     """
-    value = os.getenv(key)
-    if value is not None:
-        value = value.strip()
-    return value if value else default
+    val = os.environ.get(key)
+    if val is not None:
+        val = val.strip()
+    
+    if not val:
+        if required:
+            raise ValueError(f"Missing required environment variable: '{key}'")
+        return default or ""
+    return val
 
 
-def get_int_env(key: str, default: Optional[int] = None) -> Optional[int]:
+def get_int(key: str, default: Optional[int] = None, required: bool = True) -> int:
     """
-    Safely retrieve and parse an integer environment variable.
-    Returns the default value if the key is missing or invalid.
+    Retrieve and parse an integer environment variable.
+
+    :param key: Environment variable name
+    :param default: Optional default fallback value
+    :param required: Whether this variable is strictly required
+    :return: Parsed integer value
+    :raises ValueError: If variable is missing, not a valid integer, or required check fails
     """
-    value = get_str_env(key)
-    if value is None:
-        return default
+    val_str = os.environ.get(key)
+    if val_str is not None:
+        val_str = val_str.strip()
+
+    if not val_str:
+        if required and default is None:
+            raise ValueError(f"Missing required integer environment variable: '{key}'")
+        return default if default is not None else 0
+
     try:
-        return int(value)
-    except ValueError:
-        logger.warning(
-            f"Environment variable '{key}' with value '{value}' could not be parsed as an integer. "
-            f"Falling back to default: {default}"
-        )
-        return default
+        return int(val_str)
+    except ValueError as err:
+        raise ValueError(
+            f"Invalid integer for environment variable '{key}': received '{val_str}'"
+        ) from err
 
 
-def parse_admin_ids(key: str = "ADMIN_ID") -> List[int]:
+def decode_firebase_credentials(b64_string: str) -> Dict[str, Any]:
     """
-    Parses ADMIN_ID environment variable into a list of integers.
-    Supports comma-separated integers (e.g., "123456,789012") or a single integer.
-    """
-    raw_val = get_str_env(key, "")
-    if not raw_val:
-        return []
+    Decode Base64 encoded Firebase Service Account JSON credentials.
 
-    admin_list = []
-    for part in raw_val.split(","):
-        part = part.strip()
-        if part:
-            try:
-                admin_list.append(int(part))
-            except ValueError:
-                logger.warning(f"Invalid admin ID entry '{part}' in {key}. Skipping.")
-    return admin_list
-
-
-def parse_firebase_credentials(key: str = "FIREBASE_CREDENTIALS_B64") -> Optional[Dict[str, Any]]:
+    :param b64_string: Base64 encoded service account json
+    :return: Parsed dictionary containing service account credentials
+    :raises ValueError: If decoding or JSON parsing fails
     """
-    Safely decodes Base64 encoded Firebase service account credentials
-    and parses them into a dictionary.
-    """
-    b64_string = get_str_env(key)
     if not b64_string:
-        return None
+        raise ValueError("FIREBASE_CREDENTIALS_B64 is empty or not provided.")
 
     try:
         decoded_bytes = base64.b64decode(b64_string)
         decoded_str = decoded_bytes.decode("utf-8")
-        return json.loads(decoded_str)
+        cred_dict = json.loads(decoded_str)
+        if not isinstance(cred_dict, dict) or "project_id" not in cred_dict:
+            raise ValueError("Decoded Firebase JSON is missing 'project_id' key.")
+        return cred_dict
     except Exception as e:
-        logger.error(f"Failed to decode or parse {key}: {e}")
-        return None
+        raise ValueError(
+            f"Failed to decode and parse FIREBASE_CREDENTIALS_B64. "
+            f"Ensure it is a valid base64-encoded service account JSON: {e}"
+        ) from e
 
 
-# Environment Variables Initialization
-BOT_TOKEN: str = get_str_env("BOT_TOKEN", "")
-ADMIN_IDS: List[int] = parse_admin_ids("ADMIN_ID")
-PRIMARY_ADMIN_ID: Optional[int] = ADMIN_IDS[0] if ADMIN_IDS else None
-
-MAIN_CHANNEL_ID: Optional[int] = get_int_env("MAIN_CHANNEL_ID")
-BACKUP_CHANNEL_ID: Optional[int] = get_int_env("BACKUP_CHANNEL_ID")
-
-MAIN_CHANNEL_LINK: str = get_str_env("MAIN_CHANNEL_LINK", "")
-BACKUP_CHANNEL_LINK: str = get_str_env("BACKUP_CHANNEL_LINK", "")
-
-FIREBASE_CREDENTIALS_B64: str = get_str_env("FIREBASE_CREDENTIALS_B64", "")
-FIREBASE_CREDENTIALS_DICT: Optional[Dict[str, Any]] = parse_firebase_credentials("FIREBASE_CREDENTIALS_B64")
-
-# Port assignment suitable for hosting environments like Render
-PORT: int = get_int_env("PORT", 10000)
-
-
-def validate_config() -> bool:
+def validate_config() -> None:
     """
-    Validates required configuration variables.
-    Logs explicit error messages for missing or invalid parameters.
-    Returns True if valid, raises ValueError if essential configuration is missing.
+    Validate all required environment variables and dependencies.
+    Logs clear errors and exits if critical parameters are missing.
     """
     errors = []
+    
+    # Check BOT_TOKEN
+    try:
+        token = get_str("BOT_TOKEN", required=True)
+        if ":" not in token:
+            errors.append("BOT_TOKEN format is invalid. It should match '<bot_id>:<token>'.")
+    except ValueError as e:
+        errors.append(str(e))
 
-    if not BOT_TOKEN:
-        errors.append("BOT_TOKEN is missing or empty.")
+    # Check ADMIN_ID
+    try:
+        get_int("ADMIN_ID", required=True)
+    except ValueError as e:
+        errors.append(str(e))
 
-    if not ADMIN_IDS:
-        errors.append("ADMIN_ID is missing or contains no valid integer IDs.")
+    # Check MAIN_CHANNEL_ID
+    try:
+        get_int("MAIN_CHANNEL_ID", required=True)
+    except ValueError as e:
+        errors.append(str(e))
 
-    if MAIN_CHANNEL_ID is None:
-        errors.append("MAIN_CHANNEL_ID is missing or not a valid integer.")
+    # Check BACKUP_CHANNEL_ID
+    try:
+        get_int("BACKUP_CHANNEL_ID", required=True)
+    except ValueError as e:
+        errors.append(str(e))
 
-    if BACKUP_CHANNEL_ID is None:
-        errors.append("BACKUP_CHANNEL_ID is missing or not a valid integer.")
+    # Check MAIN_CHANNEL_LINK
+    try:
+        get_str("MAIN_CHANNEL_LINK", required=True)
+    except ValueError as e:
+        errors.append(str(e))
 
-    if not MAIN_CHANNEL_LINK:
-        errors.append("MAIN_CHANNEL_LINK is missing or empty.")
+    # Check BACKUP_CHANNEL_LINK
+    try:
+        get_str("BACKUP_CHANNEL_LINK", required=True)
+    except ValueError as e:
+        errors.append(str(e))
 
-    if not BACKUP_CHANNEL_LINK:
-        errors.append("BACKUP_CHANNEL_LINK is missing or empty.")
+    # Check FIREBASE_CREDENTIALS_B64
+    try:
+        b64_creds = get_str("FIREBASE_CREDENTIALS_B64", required=True)
+        decode_firebase_credentials(b64_creds)
+    except ValueError as e:
+        errors.append(str(e))
 
-    if not FIREBASE_CREDENTIALS_B64:
-        errors.append("FIREBASE_CREDENTIALS_B64 is missing or empty.")
-    elif FIREBASE_CREDENTIALS_DICT is None:
-        errors.append("FIREBASE_CREDENTIALS_B64 is invalid, corrupted, or failed Base64/JSON parsing.")
+    # Check PORT (Render sets PORT dynamically; fallback to 8080/10000)
+    try:
+        get_int("PORT", default=int(os.environ.get("PORT", "10000")), required=False)
+    except ValueError as e:
+        errors.append(str(e))
 
     if errors:
-        error_msg = "Configuration validation failed:\n - " + "\n - ".join(errors)
-        logger.critical(error_msg)
-        raise ValueError(error_msg)
+        logger.error("Configuration validation failed with the following errors:")
+        for err in errors:
+            logger.error(" - %s", err)
+        raise SystemExit(1)
 
-    logger.info("Configuration successfully validated.")
-    return True
+    logger.info("Configuration successfully validated for Telegram Bot.")
+
+
+# Run validation upon loading module
+validate_config()
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Immutable production settings container."""
+    BOT_TOKEN: str = get_str("BOT_TOKEN")
+    ADMIN_ID: int = get_int("ADMIN_ID")
+    MAIN_CHANNEL_ID: int = get_int("MAIN_CHANNEL_ID")
+    BACKUP_CHANNEL_ID: int = get_int("BACKUP_CHANNEL_ID")
+    MAIN_CHANNEL_LINK: str = get_str("MAIN_CHANNEL_LINK")
+    BACKUP_CHANNEL_LINK: str = get_str("BACKUP_CHANNEL_LINK")
+    FIREBASE_CREDENTIALS_B64: str = get_str("FIREBASE_CREDENTIALS_B64")
+    PORT: int = get_int("PORT", default=10000, required=False)
+    
+    @property
+    def firebase_credentials_dict(self) -> Dict[str, Any]:
+        """Returns decoded Firebase credentials dictionary."""
+        return decode_firebase_credentials(self.FIREBASE_CREDENTIALS_B64)
+
+
+# Singleton Config Instance
+Config = Settings()
+
+# Direct export of constants for flexible imports
+BOT_TOKEN = Config.BOT_TOKEN
+ADMIN_ID = Config.ADMIN_ID
+MAIN_CHANNEL_ID = Config.MAIN_CHANNEL_ID
+BACKUP_CHANNEL_ID = Config.BACKUP_CHANNEL_ID
+MAIN_CHANNEL_LINK = Config.MAIN_CHANNEL_LINK
+BACKUP_CHANNEL_LINK = Config.BACKUP_CHANNEL_LINK
+FIREBASE_CREDENTIALS_B64 = Config.FIREBASE_CREDENTIALS_B64
+PORT = Config.PORT
+
+
+def initialize_firebase():
+    """
+    Helper function to initialize Firebase Admin SDK using the decoded credentials.
+    Compatible with firebase-admin >=6.5.0
+    """
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(Config.firebase_credentials_dict)
+            firebase_admin.initialize_app(cred)
+            logger.info("Firebase Admin SDK initialized successfully.")
+        return firestore.client()
+    except ImportError:
+        logger.warning("firebase-admin package is not installed.")
+        return None
+    except Exception as e:
+        logger.error("Failed to initialize Firebase Admin: %s", e)
+        raise
