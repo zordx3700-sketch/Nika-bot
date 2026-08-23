@@ -1,17 +1,23 @@
-"""
-Production-Ready Firebase Firestore Database Manager.
+# FILE: database.py
+# CHANGE: Added content_type (normal/series), Seasons, Episodes, Multi-URL list support, Requests storage, and enhanced search engine
 
-Features supported:
-- USERS: register_user, get_user, get_total_users
-- CATEGORIES: add, edit, delete, enable/disable, reorder, get all
-- TITLES: add, edit, delete, get, category assignment
-- KEYWORDS: add, remove, search by keyword
-- LANGUAGES: add, edit, delete, enable/disable, get available languages
-- RESOLUTIONS: add, edit, delete, enable/disable, get available resolutions
-- MEDIA URLS: title + language + resolution combinations (watch_url and download_url independent)
-- SEARCH: exact title, partial title, keyword, alias, suggestions
-- SETTINGS: help text, bot settings
-- SEARCH LOGS: user, keyword, result, timestamp
+"""
+Production-Ready Firebase Firestore Database Manager for Telegram Anime & Media Bot.
+
+Compatible with:
+- Python: 3.11+
+- firebase-admin: >=6.5.0
+
+Supports:
+- Users & Activity Tracking
+- Categories (Add, Edit, Reorder, Enable/Disable, Delete)
+- Titles (Normal / Series, Category-Scoped, Keywords, Aliases, Search Tokens)
+- Seasons & Episodes for Series titles
+- Languages & Resolutions (Admin managed)
+- Multiple Watch URLs and Multiple Download URLs per combination
+- Advanced Search Engine (Titles, Keywords, Aliases, Substrings, Suggestions)
+- User Media Requests (Stored & forwarded to Admin)
+- Bot Settings & Dynamic Help text
 """
 
 import os
@@ -34,7 +40,7 @@ def _get_firestore_client() -> firestore.firestore.Client:
         b64_creds = os.environ.get("FIREBASE_CREDENTIALS_B64", "").strip()
         if not b64_creds:
             raise ValueError("FIREBASE_CREDENTIALS_B64 environment variable is missing or empty.")
-        
+
         try:
             decoded_bytes = base64.b64decode(b64_creds)
             cred_dict = json.loads(decoded_bytes.decode("utf-8"))
@@ -49,12 +55,12 @@ def _get_firestore_client() -> firestore.firestore.Client:
 
 
 class DatabaseManager:
-    """Production Firestore Database Manager for Telegram Bot."""
+    """Production Firestore Database Manager."""
 
     def __init__(self, db_client: Optional[firestore.firestore.Client] = None):
         self.db: firestore.firestore.Client = db_client or _get_firestore_client()
-        
-        # Collection references
+
+        # Root Collections
         self.users_col = self.db.collection("users")
         self.categories_col = self.db.collection("categories")
         self.titles_col = self.db.collection("titles")
@@ -62,6 +68,7 @@ class DatabaseManager:
         self.resolutions_col = self.db.collection("resolutions")
         self.settings_col = self.db.collection("settings")
         self.search_logs_col = self.db.collection("search_logs")
+        self.requests_col = self.db.collection("requests")
 
     @staticmethod
     def _now() -> datetime:
@@ -77,9 +84,9 @@ class DatabaseManager:
         username: Optional[str] = None,
         first_name: Optional[str] = None,
         last_name: Optional[str] = None,
-        language_code: Optional[str] = None
+        language_code: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Register a new user or update existing user activity info."""
+        """Register a new user or update existing user activity."""
         doc_ref = self.users_col.document(str(user_id))
         doc = doc_ref.get()
 
@@ -104,19 +111,22 @@ class DatabaseManager:
         return user_data
 
     def get_user(self, user_id: Union[int, str]) -> Optional[Dict[str, Any]]:
-        """Retrieve user document by Telegram user ID."""
+        """Retrieve user document by ID."""
         doc = self.users_col.document(str(user_id)).get()
         if doc.exists:
-            res = doc.to_dict()
+            res = doc.to_dict() or {}
             res["id"] = doc.id
             return res
         return None
 
     def get_total_users(self) -> int:
         """Count total registered users."""
-        count_query = self.users_col.count()
-        results = count_query.get()
-        return int(results[0][0].value)
+        try:
+            count_query = self.users_col.count()
+            results = count_query.get()
+            return int(results[0][0].value)
+        except Exception:
+            return len(list(self.users_col.stream()))
 
     # =========================================================================
     # CATEGORIES
@@ -141,9 +151,9 @@ class DatabaseManager:
         category_id: str,
         name: Optional[str] = None,
         order: Optional[int] = None,
-        is_enabled: Optional[bool] = None
+        is_enabled: Optional[bool] = None,
     ) -> bool:
-        """Edit category properties."""
+        """Edit category attributes."""
         doc_ref = self.categories_col.document(category_id)
         if not doc_ref.get().exists:
             return False
@@ -161,7 +171,7 @@ class DatabaseManager:
         return True
 
     def delete_category(self, category_id: str) -> bool:
-        """Delete category by ID."""
+        """Delete a category."""
         doc_ref = self.categories_col.document(category_id)
         if not doc_ref.get().exists:
             return False
@@ -173,36 +183,27 @@ class DatabaseManager:
         """Enable or disable category."""
         return self.edit_category(category_id, is_enabled=is_enabled)
 
-    def reorder_categories(self, category_orders: Dict[str, int]) -> None:
-        """
-        Batch update display orders for categories.
-        :param category_orders: Dict where key is category_id and value is order int
-        """
-        batch = self.db.batch()
-        for cat_id, order in category_orders.items():
-            doc_ref = self.categories_col.document(cat_id)
-            batch.update(doc_ref, {"order": int(order), "updated_at": self._now()})
-        batch.commit()
-
     def get_all_categories(self, only_enabled: bool = False) -> List[Dict[str, Any]]:
-        """Get all categories sorted by order."""
+        """Get all categories ordered by display order."""
         query = self.categories_col
         if only_enabled:
             query = query.where(filter=FieldFilter("is_enabled", "==", True))
-        
+
         docs = query.order_by("order").stream()
         categories = []
         for doc in docs:
-            item = doc.to_dict()
+            item = doc.to_dict() or {}
             item["id"] = doc.id
             categories.append(item)
         return categories
 
     def get_category(self, category_id: str) -> Optional[Dict[str, Any]]:
         """Get single category by ID."""
+        if not category_id:
+            return None
         doc = self.categories_col.document(category_id).get()
         if doc.exists:
-            item = doc.to_dict()
+            item = doc.to_dict() or {}
             item["id"] = doc.id
             return item
         return None
@@ -212,7 +213,7 @@ class DatabaseManager:
     # =========================================================================
 
     def add_language(self, name: str, code: str = "", order: int = 0, is_enabled: bool = True) -> str:
-        """Add a new supported audio/sub language."""
+        """Add a supported audio/subtitle language."""
         data = {
             "name": name.strip(),
             "code": code.strip().lower() or name.strip().lower(),
@@ -230,7 +231,7 @@ class DatabaseManager:
         name: Optional[str] = None,
         code: Optional[str] = None,
         order: Optional[int] = None,
-        is_enabled: Optional[bool] = None
+        is_enabled: Optional[bool] = None,
     ) -> bool:
         """Edit language details."""
         doc_ref = self.languages_col.document(language_id)
@@ -259,19 +260,19 @@ class DatabaseManager:
         return True
 
     def set_language_enabled(self, language_id: str, is_enabled: bool) -> bool:
-        """Enable or disable a language."""
+        """Toggle language enabled state."""
         return self.edit_language(language_id, is_enabled=is_enabled)
 
     def get_available_languages(self, only_enabled: bool = True) -> List[Dict[str, Any]]:
-        """Get all languages ordered by preference."""
+        """Get available languages."""
         query = self.languages_col
         if only_enabled:
             query = query.where(filter=FieldFilter("is_enabled", "==", True))
-        
+
         docs = query.order_by("order").stream()
         languages = []
         for doc in docs:
-            item = doc.to_dict()
+            item = doc.to_dict() or {}
             item["id"] = doc.id
             languages.append(item)
         return languages
@@ -281,7 +282,7 @@ class DatabaseManager:
     # =========================================================================
 
     def add_resolution(self, name: str, order: int = 0, is_enabled: bool = True) -> str:
-        """Add a video quality resolution (e.g., 480p, 720p, 1080p, 4K)."""
+        """Add a video quality option (e.g., 480p, 720p, 1080p, 4K)."""
         data = {
             "name": name.strip(),
             "order": int(order),
@@ -297,9 +298,9 @@ class DatabaseManager:
         resolution_id: str,
         name: Optional[str] = None,
         order: Optional[int] = None,
-        is_enabled: Optional[bool] = None
+        is_enabled: Optional[bool] = None,
     ) -> bool:
-        """Edit resolution parameters."""
+        """Edit resolution."""
         doc_ref = self.resolutions_col.document(resolution_id)
         if not doc_ref.get().exists:
             return False
@@ -324,67 +325,83 @@ class DatabaseManager:
         return True
 
     def set_resolution_enabled(self, resolution_id: str, is_enabled: bool) -> bool:
-        """Enable or disable a resolution."""
+        """Toggle resolution enabled state."""
         return self.edit_resolution(resolution_id, is_enabled=is_enabled)
 
     def get_available_resolutions(self, only_enabled: bool = True) -> List[Dict[str, Any]]:
-        """Get all video resolutions ordered by specification."""
+        """Get available resolutions."""
         query = self.resolutions_col
         if only_enabled:
             query = query.where(filter=FieldFilter("is_enabled", "==", True))
-        
+
         docs = query.order_by("order").stream()
         resolutions = []
         for doc in docs:
-            item = doc.to_dict()
+            item = doc.to_dict() or {}
             item["id"] = doc.id
             resolutions.append(item)
         return resolutions
 
     # =========================================================================
-    # TITLES & CATEGORY ASSIGNMENT
+    # TITLES (NORMAL / SERIES) & CATEGORY ASSIGNMENT
     # =========================================================================
+
+    def _build_search_tokens(self, title: str, keywords: List[str], aliases: List[str]) -> List[str]:
+        """Build normalized search tokens for fast index matching."""
+        tokens = set()
+        t_clean = title.strip().lower()
+        tokens.add(t_clean)
+        for word in t_clean.split():
+            if len(word) > 1:
+                tokens.add(word)
+
+        for kw in keywords:
+            clean_kw = kw.strip().lower()
+            if clean_kw:
+                tokens.add(clean_kw)
+                for w in clean_kw.split():
+                    if len(w) > 1:
+                        tokens.add(w)
+
+        for al in aliases:
+            clean_al = al.strip().lower()
+            if clean_al:
+                tokens.add(clean_al)
+                for w in clean_al.split():
+                    if len(w) > 1:
+                        tokens.add(w)
+
+        return list(tokens)
 
     def add_title(
         self,
         title: str,
         category_ids: Optional[List[str]] = None,
+        content_type: str = "normal",  # "normal" or "series"
         keywords: Optional[List[str]] = None,
         aliases: Optional[List[str]] = None,
         poster_url: str = "",
         description: str = "",
         release_year: Optional[int] = None,
-        is_published: bool = True
+        is_published: bool = True,
     ) -> str:
         """
-        Add a new media title.
-        Generates search tokens for flexible partial search and suggestions.
+        Add a new media title scoped to category_ids.
+        content_type: 'normal' (standalone movie/anime) or 'series' (seasons + episodes).
         """
         t_clean = title.strip()
         kw_list = [k.strip().lower() for k in (keywords or []) if k.strip()]
         al_list = [a.strip() for a in (aliases or []) if a.strip()]
-        
-        # Build search tokens
-        search_tokens = set()
-        search_tokens.add(t_clean.lower())
-        for word in t_clean.lower().split():
-            search_tokens.add(word)
-        for kw in kw_list:
-            search_tokens.add(kw)
-            for kw_word in kw.split():
-                search_tokens.add(kw_word)
-        for al in al_list:
-            search_tokens.add(al.lower())
-            for al_word in al.lower().split():
-                search_tokens.add(al_word)
+        tokens = self._build_search_tokens(t_clean, kw_list, al_list)
 
         data = {
             "title": t_clean,
             "title_lower": t_clean.lower(),
+            "content_type": "series" if content_type == "series" else "normal",
             "category_ids": category_ids or [],
             "keywords": kw_list,
             "aliases": al_list,
-            "search_tokens": list(search_tokens),
+            "search_tokens": tokens,
             "poster_url": poster_url.strip(),
             "description": description.strip(),
             "release_year": release_year,
@@ -395,7 +412,7 @@ class DatabaseManager:
         }
 
         _, doc_ref = self.titles_col.add(data)
-        logger.info("Added title: %s (%s)", t_clean, doc_ref.id)
+        logger.info("Added title '%s' (type: %s) with ID %s", t_clean, data["content_type"], doc_ref.id)
         return doc_ref.id
 
     def edit_title(
@@ -403,14 +420,15 @@ class DatabaseManager:
         title_id: str,
         title: Optional[str] = None,
         category_ids: Optional[List[str]] = None,
+        content_type: Optional[str] = None,
         keywords: Optional[List[str]] = None,
         aliases: Optional[List[str]] = None,
         poster_url: Optional[str] = None,
         description: Optional[str] = None,
         release_year: Optional[int] = None,
-        is_published: Optional[bool] = None
+        is_published: Optional[bool] = None,
     ) -> bool:
-        """Edit an existing title details and regenerate search indices."""
+        """Edit title and refresh search tokens."""
         doc_ref = self.titles_col.document(title_id)
         existing = doc_ref.get()
         if not existing.exists:
@@ -438,6 +456,9 @@ class DatabaseManager:
         if category_ids is not None:
             update_data["category_ids"] = category_ids
 
+        if content_type is not None:
+            update_data["content_type"] = "series" if content_type == "series" else "normal"
+
         if keywords is not None:
             update_data["keywords"] = curr_keywords
 
@@ -456,80 +477,86 @@ class DatabaseManager:
         if is_published is not None:
             update_data["is_published"] = bool(is_published)
 
-        # Re-compute search tokens
-        search_tokens = set()
-        search_tokens.add(curr_title.lower())
-        for word in curr_title.lower().split():
-            search_tokens.add(word)
-        for kw in curr_keywords:
-            search_tokens.add(kw)
-            for kw_word in kw.split():
-                search_tokens.add(kw_word)
-        for al in curr_aliases:
-            search_tokens.add(al.lower())
-            for al_word in al.lower().split():
-                search_tokens.add(al_word)
-
-        update_data["search_tokens"] = list(search_tokens)
+        update_data["search_tokens"] = self._build_search_tokens(curr_title, curr_keywords, curr_aliases)
         doc_ref.update(update_data)
         return True
 
     def delete_title(self, title_id: str) -> bool:
-        """Delete a title and all its media URL combinations."""
+        """Delete title, all seasons, episodes, and media items."""
         doc_ref = self.titles_col.document(title_id)
         if not doc_ref.get().exists:
             return False
 
-        # Delete media combinations subcollection
-        media_col = doc_ref.collection("media_items")
-        media_docs = media_col.stream()
-        batch = self.db.batch()
-        for m_doc in media_docs:
-            batch.delete(m_doc.reference)
-        batch.commit()
+        # Delete normal media items subcollection
+        for m_doc in doc_ref.collection("media_items").stream():
+            m_doc.reference.delete()
 
-        # Delete title document
+        # Delete seasons and nested episodes
+        for s_doc in doc_ref.collection("seasons").stream():
+            for ep_doc in s_doc.reference.collection("episodes").stream():
+                for ep_m_doc in ep_doc.reference.collection("media_items").stream():
+                    ep_m_doc.reference.delete()
+                ep_doc.reference.delete()
+            s_doc.reference.delete()
+
         doc_ref.delete()
-        logger.info("Deleted title: %s", title_id)
+        logger.info("Deleted title %s", title_id)
         return True
 
     def get_title(self, title_id: str) -> Optional[Dict[str, Any]]:
-        """Get single title by document ID."""
+        """Get single title by ID."""
+        if not title_id:
+            return None
         doc = self.titles_col.document(title_id).get()
         if doc.exists:
-            item = doc.to_dict()
+            item = doc.to_dict() or {}
             item["id"] = doc.id
             return item
         return None
 
-    def assign_categories_to_title(self, title_id: str, category_ids: List[str]) -> bool:
-        """Assign category IDs to title."""
-        doc_ref = self.titles_col.document(title_id)
-        if not doc_ref.get().exists:
-            return False
-        doc_ref.update({
-            "category_ids": category_ids,
-            "updated_at": self._now()
-        })
-        return True
+    def get_titles_by_category(
+        self,
+        category_id: str,
+        only_published: bool = True,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Fetch titles scoped specifically to category_id."""
+        query = self.titles_col.where(filter=FieldFilter("category_ids", "array_contains", category_id))
+        if only_published:
+            query = query.where(filter=FieldFilter("is_published", "==", True))
 
-    def get_titles_by_category(self, category_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """Fetch published titles under a specific category."""
-        query = (
-            self.titles_col
-            .where(filter=FieldFilter("category_ids", "array_contains", category_id))
-            .where(filter=FieldFilter("is_published", "==", True))
-            .limit(limit)
-        )
+        docs = query.limit(limit).stream()
         results = []
-        for doc in query.stream():
-            item = doc.to_dict()
+        for doc in docs:
+            item = doc.to_dict() or {}
             item["id"] = doc.id
             results.append(item)
         return results
 
+    def get_all_titles(self, only_published: bool = False, limit: int = 150) -> List[Dict[str, Any]]:
+        """Get all titles ordered by updated_at."""
+        query = self.titles_col
+        if only_published:
+            query = query.where(filter=FieldFilter("is_published", "==", True))
+
+        docs = query.order_by("updated_at", direction=firestore.Query.DESCENDING).limit(limit).stream()
+        results = []
+        for doc in docs:
+            item = doc.to_dict() or {}
+            item["id"] = doc.id
+            results.append(item)
+        return results
+
+    def assign_categories_to_title(self, title_id: str, category_ids: List[str]) -> bool:
+        """Assign list of categories to title."""
+        doc_ref = self.titles_col.document(title_id)
+        if not doc_ref.get().exists:
+            return False
+        doc_ref.update({"category_ids": category_ids, "updated_at": self._now()})
+        return True
+
     # =========================================================================
-    # KEYWORDS & ALIASES
+    # KEYWORDS MANAGEMENT
     # =========================================================================
 
     def add_keyword(self, title_id: str, keyword: str) -> bool:
@@ -560,152 +587,393 @@ class DatabaseManager:
         kws = [k for k in data.get("keywords", []) if k != kw]
         return self.edit_title(title_id, keywords=kws)
 
-    def search_by_keyword(self, keyword: str, limit: int = 20) -> List[Dict[str, Any]]:
-        """Search titles by exact or contains keyword."""
-        kw = keyword.strip().lower()
-        if not kw:
-            return []
+    # =========================================================================
+    # SEASONS & EPISODES (SERIES SYSTEM)
+    # =========================================================================
 
-        query = (
-            self.titles_col
-            .where(filter=FieldFilter("keywords", "array_contains", kw))
-            .where(filter=FieldFilter("is_published", "==", True))
-            .limit(limit)
-        )
+    def add_season(self, title_id: str, season_number: int, season_name: str = "") -> str:
+        """Add a season to a series title."""
+        name = season_name.strip() or f"Season {season_number}"
+        data = {
+            "title_id": title_id,
+            "season_number": int(season_number),
+            "season_name": name,
+            "created_at": self._now(),
+            "updated_at": self._now(),
+        }
+        seasons_col = self.titles_col.document(title_id).collection("seasons")
+        _, doc_ref = seasons_col.add(data)
+        logger.info("Added season %s to title %s", name, title_id)
+        return doc_ref.id
+
+    def get_seasons(self, title_id: str) -> List[Dict[str, Any]]:
+        """Get all seasons for a title ordered by season_number."""
+        seasons_col = self.titles_col.document(title_id).collection("seasons")
+        docs = seasons_col.order_by("season_number").stream()
         results = []
-        for doc in query.stream():
-            item = doc.to_dict()
+        for doc in docs:
+            item = doc.to_dict() or {}
             item["id"] = doc.id
             results.append(item)
         return results
 
+    def get_season(self, title_id: str, season_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single season by ID."""
+        doc = self.titles_col.document(title_id).collection("seasons").document(season_id).get()
+        if doc.exists:
+            item = doc.to_dict() or {}
+            item["id"] = doc.id
+            return item
+        return None
+
+    def delete_season(self, title_id: str, season_id: str) -> bool:
+        """Delete a season and all its episodes."""
+        s_ref = self.titles_col.document(title_id).collection("seasons").document(season_id)
+        if not s_ref.get().exists:
+            return False
+
+        # Delete all episodes
+        for ep_doc in s_ref.collection("episodes").stream():
+            for m_doc in ep_doc.reference.collection("media_items").stream():
+                m_doc.reference.delete()
+            ep_doc.reference.delete()
+
+        s_ref.delete()
+        return True
+
+    def add_episode(
+        self,
+        title_id: str,
+        season_id: str,
+        episode_number: int,
+        episode_title: str = "",
+    ) -> str:
+        """Add an episode to a season."""
+        ep_name = episode_title.strip() or f"Episode {episode_number}"
+        data = {
+            "title_id": title_id,
+            "season_id": season_id,
+            "episode_number": int(episode_number),
+            "episode_title": ep_name,
+            "created_at": self._now(),
+            "updated_at": self._now(),
+        }
+        ep_col = (
+            self.titles_col.document(title_id)
+            .collection("seasons")
+            .document(season_id)
+            .collection("episodes")
+        )
+        _, doc_ref = ep_col.add(data)
+        logger.info("Added episode %s to season %s", ep_name, season_id)
+        return doc_ref.id
+
+    def get_episodes(self, title_id: str, season_id: str) -> List[Dict[str, Any]]:
+        """Get all episodes for a season ordered by episode_number."""
+        ep_col = (
+            self.titles_col.document(title_id)
+            .collection("seasons")
+            .document(season_id)
+            .collection("episodes")
+        )
+        docs = ep_col.order_by("episode_number").stream()
+        results = []
+        for doc in docs:
+            item = doc.to_dict() or {}
+            item["id"] = doc.id
+            results.append(item)
+        return results
+
+    def get_episode(self, title_id: str, season_id: str, episode_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single episode by ID."""
+        doc = (
+            self.titles_col.document(title_id)
+            .collection("seasons")
+            .document(season_id)
+            .collection("episodes")
+            .document(episode_id)
+            .get()
+        )
+        if doc.exists:
+            item = doc.to_dict() or {}
+            item["id"] = doc.id
+            return item
+        return None
+
+    def delete_episode(self, title_id: str, season_id: str, episode_id: str) -> bool:
+        """Delete an episode."""
+        ep_ref = (
+            self.titles_col.document(title_id)
+            .collection("seasons")
+            .document(season_id)
+            .collection("episodes")
+            .document(episode_id)
+        )
+        if not ep_ref.get().exists:
+            return False
+
+        for m_doc in ep_ref.collection("media_items").stream():
+            m_doc.reference.delete()
+
+        ep_ref.delete()
+        return True
+
     # =========================================================================
-    # MEDIA URLS (title + language + resolution combinations)
+    # MULTI-URL MEDIA COMBINATIONS (NORMAL & SERIES)
     # =========================================================================
 
     @staticmethod
     def _make_combo_id(language: str, resolution: str) -> str:
-        """Generate a clean deterministic document ID for combinations."""
-        clean_lang = "".join(c if c.isalnum() else "_" for c in language.strip().lower())
-        clean_res = "".join(c if c.isalnum() else "_" for c in resolution.strip().lower())
-        return f"{clean_lang}__{clean_res}"
+        """Generate a deterministic ID for language + resolution."""
+        clean_l = "".join(c if c.isalnum() else "_" for c in language.strip().lower())
+        clean_r = "".join(c if c.isalnum() else "_" for c in resolution.strip().lower())
+        return f"{clean_l}__{clean_r}"
 
-    def set_media_url(
+    def _get_media_ref(
         self,
         title_id: str,
         language: str,
         resolution: str,
-        watch_url: Optional[str] = None,
-        download_url: Optional[str] = None,
-        file_size: str = "",
-        extra_note: str = ""
-    ) -> bool:
-        """
-        Add or update a media URL combination for title + language + resolution.
-        Stores watch_url and download_url independently without overwriting the other
-        if not provided.
-        """
-        title_ref = self.titles_col.document(title_id)
-        if not title_ref.get().exists:
-            return False
-
+        season_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ):
+        """Helper to get reference to the media combination document."""
         combo_id = self._make_combo_id(language, resolution)
-        media_doc_ref = title_ref.collection("media_items").document(combo_id)
-        existing = media_doc_ref.get()
+        if season_id and episode_id:
+            return (
+                self.titles_col.document(title_id)
+                .collection("seasons")
+                .document(season_id)
+                .collection("episodes")
+                .document(episode_id)
+                .collection("media_items")
+                .document(combo_id)
+            )
+        return self.titles_col.document(title_id).collection("media_items").document(combo_id)
 
-        data: Dict[str, Any] = {
-            "title_id": title_id,
-            "language": language.strip(),
-            "language_lower": language.strip().lower(),
-            "resolution": resolution.strip(),
-            "resolution_lower": resolution.strip().lower(),
-            "file_size": file_size.strip(),
-            "extra_note": extra_note.strip(),
-            "updated_at": self._now(),
-        }
-
-        if not existing.exists:
-            data["watch_url"] = (watch_url or "").strip()
-            data["download_url"] = (download_url or "").strip()
-            data["created_at"] = self._now()
-            media_doc_ref.set(data)
-        else:
-            if watch_url is not None:
-                data["watch_url"] = watch_url.strip()
-            if download_url is not None:
-                data["download_url"] = download_url.strip()
-            media_doc_ref.update(data)
-
-        logger.info("Updated media item %s for title %s", combo_id, title_id)
-        return True
-
-    def delete_media_url(self, title_id: str, language: str, resolution: str) -> bool:
-        """Delete specific media combination."""
-        combo_id = self._make_combo_id(language, resolution)
-        media_ref = self.titles_col.document(title_id).collection("media_items").document(combo_id)
-        if not media_ref.get().exists:
-            return False
-        media_ref.delete()
-        return True
-
-    def get_media_urls_for_title(self, title_id: str) -> List[Dict[str, Any]]:
-        """Get all media URL combinations for a specific title."""
-        media_col = self.titles_col.document(title_id).collection("media_items")
-        docs = media_col.stream()
-        items = []
-        for doc in docs:
-            d = doc.to_dict()
-            d["id"] = doc.id
-            items.append(d)
-        return items
-
-    def get_media_url(
+    def add_media_url_link(
         self,
         title_id: str,
         language: str,
-        resolution: str
+        resolution: str,
+        url: str,
+        url_type: str = "watch",  # 'watch' or 'download'
+        label: str = "",
+        season_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Add a URL to the combination list without overwriting existing links.
+        url_type: 'watch' or 'download'.
+        """
+        if not url or not url.strip():
+            return False
+
+        doc_ref = self._get_media_ref(title_id, language, resolution, season_id, episode_id)
+        doc = doc_ref.get()
+
+        clean_url = url.strip()
+        custom_label = label.strip()
+
+        if not doc.exists:
+            watch_urls = [clean_url] if url_type == "watch" else []
+            download_urls = [clean_url] if url_type == "download" else []
+            watch_labels = [custom_label] if url_type == "watch" else []
+            download_labels = [custom_label] if url_type == "download" else []
+
+            data = {
+                "title_id": title_id,
+                "season_id": season_id or "",
+                "episode_id": episode_id or "",
+                "language": language.strip(),
+                "resolution": resolution.strip(),
+                "watch_urls": watch_urls,
+                "download_urls": download_urls,
+                "watch_labels": watch_labels,
+                "download_labels": download_labels,
+                # Legacy compatibility fields
+                "watch_url": clean_url if url_type == "watch" else "",
+                "download_url": clean_url if url_type == "download" else "",
+                "created_at": self._now(),
+                "updated_at": self._now(),
+            }
+            doc_ref.set(data)
+        else:
+            existing = doc.to_dict() or {}
+            watch_urls = list(existing.get("watch_urls", []))
+            download_urls = list(existing.get("download_urls", []))
+            watch_labels = list(existing.get("watch_labels", []))
+            download_labels = list(existing.get("download_labels", []))
+
+            # Include legacy single URL if not in list
+            if existing.get("watch_url") and existing.get("watch_url") not in watch_urls:
+                watch_urls.insert(0, existing.get("watch_url"))
+            if existing.get("download_url") and existing.get("download_url") not in download_urls:
+                download_urls.insert(0, existing.get("download_url"))
+
+            if url_type == "watch":
+                if clean_url not in watch_urls:
+                    watch_urls.append(clean_url)
+                    watch_labels.append(custom_label)
+            elif url_type == "download":
+                if clean_url not in download_urls:
+                    download_urls.append(clean_url)
+                    download_labels.append(custom_label)
+
+            doc_ref.update({
+                "watch_urls": watch_urls,
+                "download_urls": download_urls,
+                "watch_labels": watch_labels,
+                "download_labels": download_labels,
+                "watch_url": watch_urls[0] if watch_urls else "",
+                "download_url": download_urls[0] if download_urls else "",
+                "updated_at": self._now(),
+            })
+
+        logger.info(
+            "Added %s URL to title %s (lang: %s, res: %s, ep: %s)",
+            url_type,
+            title_id,
+            language,
+            resolution,
+            episode_id,
+        )
+        return True
+
+    def remove_media_url_link(
+        self,
+        title_id: str,
+        language: str,
+        resolution: str,
+        url: str,
+        url_type: str = "watch",
+        season_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ) -> bool:
+        """Remove a specific URL from the combination list."""
+        doc_ref = self._get_media_ref(title_id, language, resolution, season_id, episode_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return False
+
+        existing = doc.to_dict() or {}
+        watch_urls = list(existing.get("watch_urls", []))
+        download_urls = list(existing.get("download_urls", []))
+
+        clean_url = url.strip()
+        if url_type == "watch" and clean_url in watch_urls:
+            watch_urls.remove(clean_url)
+        elif url_type == "download" and clean_url in download_urls:
+            download_urls.remove(clean_url)
+
+        doc_ref.update({
+            "watch_urls": watch_urls,
+            "download_urls": download_urls,
+            "watch_url": watch_urls[0] if watch_urls else "",
+            "download_url": download_urls[0] if download_urls else "",
+            "updated_at": self._now(),
+        })
+        return True
+
+    def delete_media_combo(
+        self,
+        title_id: str,
+        language: str,
+        resolution: str,
+        season_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ) -> bool:
+        """Delete an entire combination document."""
+        doc_ref = self._get_media_ref(title_id, language, resolution, season_id, episode_id)
+        if not doc_ref.get().exists:
+            return False
+        doc_ref.delete()
+        return True
+
+    def get_media_url_combo(
+        self,
+        title_id: str,
+        language: str,
+        resolution: str,
+        season_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Get specific media combination details."""
-        combo_id = self._make_combo_id(language, resolution)
-        doc = self.titles_col.document(title_id).collection("media_items").document(combo_id).get()
-        if doc.exists:
-            d = doc.to_dict()
+        """Get the combination document with full lists of watch/download URLs."""
+        doc_ref = self._get_media_ref(title_id, language, resolution, season_id, episode_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return None
+
+        d = doc.to_dict() or {}
+        d["id"] = doc.id
+
+        # Normalize URL lists
+        w_list = list(d.get("watch_urls", []))
+        if d.get("watch_url") and d.get("watch_url") not in w_list:
+            w_list.insert(0, d.get("watch_url"))
+        d["watch_urls"] = [u for u in w_list if u]
+
+        dl_list = list(d.get("download_urls", []))
+        if d.get("download_url") and d.get("download_url") not in dl_list:
+            dl_list.insert(0, d.get("download_url"))
+        d["download_urls"] = [u for u in dl_list if u]
+
+        return d
+
+    def get_all_media_combos_for_title(
+        self,
+        title_id: str,
+        season_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve all media URL combinations for a normal title or a specific episode."""
+        if season_id and episode_id:
+            col = (
+                self.titles_col.document(title_id)
+                .collection("seasons")
+                .document(season_id)
+                .collection("episodes")
+                .document(episode_id)
+                .collection("media_items")
+            )
+        else:
+            col = self.titles_col.document(title_id).collection("media_items")
+
+        docs = col.stream()
+        results = []
+        for doc in docs:
+            d = doc.to_dict() or {}
             d["id"] = doc.id
-            return d
-        return None
+            w_list = list(d.get("watch_urls", []))
+            if d.get("watch_url") and d.get("watch_url") not in w_list:
+                w_list.insert(0, d.get("watch_url"))
+            d["watch_urls"] = [u for u in w_list if u]
+
+            dl_list = list(d.get("download_urls", []))
+            if d.get("download_url") and d.get("download_url") not in dl_list:
+                dl_list.insert(0, d.get("download_url"))
+            d["download_urls"] = [u for u in dl_list if u]
+
+            results.append(d)
+        return results
 
     # =========================================================================
     # ADVANCED SEARCH ENGINE
     # =========================================================================
 
-    def search_exact_title(self, title: str) -> Optional[Dict[str, Any]]:
-        """Search title by exact title match (case-insensitive)."""
-        clean = title.strip().lower()
-        query = (
-            self.titles_col
-            .where(filter=FieldFilter("title_lower", "==", clean))
-            .where(filter=FieldFilter("is_published", "==", True))
-            .limit(1)
-        )
-        docs = list(query.stream())
-        if docs:
-            res = docs[0].to_dict()
-            res["id"] = docs[0].id
-            return res
-        return None
-
     def search_titles(
         self,
         query_str: str,
+        category_id: Optional[str] = None,
         limit: int = 15,
-        user_id: Optional[Union[int, str]] = None
+        user_id: Optional[Union[int, str]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Unified multi-strategy search:
-        1. Exact Title Match
-        2. Search Token Prefix / Contains (keywords, title words, aliases)
-        3. Fallback partial substring scan
-        Logs search query automatically if user_id is provided.
+        Unified multi-strategy case-insensitive search:
+        - Exact title matching
+        - Keyword array containment
+        - Alias matching
+        - Partial substring scan across all titles in scope
         """
         query_clean = query_str.strip().lower()
         if not query_clean:
@@ -714,46 +982,44 @@ class DatabaseManager:
         matched_ids = set()
         results: List[Dict[str, Any]] = []
 
-        # 1. Exact Match Check
-        exact = self.search_exact_title(query_clean)
-        if exact:
-            results.append(exact)
-            matched_ids.add(exact["id"])
-
-        # 2. Token / Keyword / Alias array containment
+        # 1. Direct search by search_tokens
         query_words = [w for w in query_clean.split() if len(w) > 1] or [query_clean]
-        for word in query_words[:3]:  # search top keywords
-            q = (
-                self.titles_col
-                .where(filter=FieldFilter("search_tokens", "array_contains", word))
-                .where(filter=FieldFilter("is_published", "==", True))
-                .limit(limit)
+        for word in query_words[:3]:
+            q = self.titles_col.where(filter=FieldFilter("search_tokens", "array_contains", word)).where(
+                filter=FieldFilter("is_published", "==", True)
             )
             for doc in q.stream():
                 if doc.id not in matched_ids:
-                    item = doc.to_dict()
+                    item = doc.to_dict() or {}
                     item["id"] = doc.id
-                    results.append(item)
-                    matched_ids.add(doc.id)
+                    if not category_id or category_id in item.get("category_ids", []):
+                        results.append(item)
+                        matched_ids.add(doc.id)
                 if len(results) >= limit:
                     break
 
-        # 3. Substring / Prefix match fallback if few results
+        # 2. Comprehensive in-memory substring match across titles if limit not reached
         if len(results) < limit:
-            prefix_end = query_clean + "\uf8ff"
-            q_prefix = (
-                self.titles_col
-                .where(filter=FieldFilter("title_lower", ">=", query_clean))
-                .where(filter=FieldFilter("title_lower", "<=", prefix_end))
-                .where(filter=FieldFilter("is_published", "==", True))
-                .limit(limit)
-            )
-            for doc in q_prefix.stream():
-                if doc.id not in matched_ids:
-                    item = doc.to_dict()
-                    item["id"] = doc.id
-                    results.append(item)
-                    matched_ids.add(doc.id)
+            all_published = self.get_all_titles(only_published=True, limit=200)
+            for t in all_published:
+                if t["id"] in matched_ids:
+                    continue
+                if category_id and category_id not in t.get("category_ids", []):
+                    continue
+
+                t_title = t.get("title_lower", "")
+                t_kws = t.get("keywords", [])
+                t_aliases = [a.lower() for a in t.get("aliases", [])]
+
+                if (
+                    query_clean in t_title
+                    or any(query_clean in kw for kw in t_kws)
+                    or any(query_clean in al for al in t_aliases)
+                    or any(word in t_title for word in query_words)
+                ):
+                    results.append(t)
+                    matched_ids.add(t["id"])
+
                 if len(results) >= limit:
                     break
 
@@ -763,30 +1029,54 @@ class DatabaseManager:
                 user_id=user_id,
                 keyword=query_str,
                 results_count=len(results),
-                top_result_id=results[0]["id"] if results else None
+                top_result_id=results[0]["id"] if results else None,
             )
 
         return results[:limit]
 
-    def get_search_suggestions(self, query_str: str, limit: int = 6) -> List[str]:
-        """Provide auto-complete search suggestions based on query."""
-        results = self.search_titles(query_str, limit=limit)
-        suggestions = []
-        for r in results:
-            t = r.get("title", "")
-            if t and t not in suggestions:
-                suggestions.append(t)
-        return suggestions
+    # =========================================================================
+    # USER MEDIA REQUESTS
+    # =========================================================================
+
+    def save_user_request(
+        self,
+        user_id: int,
+        first_name: str,
+        username: str,
+        request_text: str,
+    ) -> str:
+        """Save user content request in Firestore."""
+        data = {
+            "user_id": int(user_id),
+            "first_name": first_name.strip(),
+            "username": username.strip(),
+            "request_text": request_text.strip(),
+            "status": "pending",
+            "created_at": self._now(),
+        }
+        _, doc_ref = self.requests_col.add(data)
+        logger.info("Saved user request from %s: %s", user_id, request_text)
+        return doc_ref.id
+
+    def get_recent_requests(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get recent user media requests."""
+        docs = self.requests_col.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit).stream()
+        results = []
+        for doc in docs:
+            d = doc.to_dict() or {}
+            d["id"] = doc.id
+            results.append(d)
+        return results
 
     # =========================================================================
-    # BOT SETTINGS & HELP TEXT
+    # SETTINGS & HELP TEXT
     # =========================================================================
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         """Get a setting by key."""
         doc = self.settings_col.document(key).get()
         if doc.exists:
-            return doc.to_dict().get("value", default)
+            return (doc.to_dict() or {}).get("value", default)
         return default
 
     def set_setting(self, key: str, value: Any, description: str = "") -> None:
@@ -795,16 +1085,17 @@ class DatabaseManager:
             "key": key,
             "value": value,
             "description": description,
-            "updated_at": self._now()
+            "updated_at": self._now(),
         })
 
     def get_help_text(self) -> str:
         """Retrieve dynamic bot help text."""
         default_help = (
-            "👋 *Welcome to the Media Bot!*\n\n"
+            "👋 *Welcome to Anime & Media Bot Help!*\n\n"
             "• Use the search bar or send any movie/series title.\n"
             "• Browse by categories or available languages.\n"
             "• Select preferred quality to get instant watch or download links.\n"
+            "• Use **📩 Request** to ask for any missing anime or movie!"
         )
         return str(self.get_setting("help_text", default_help))
 
@@ -812,16 +1103,8 @@ class DatabaseManager:
         """Update bot help text."""
         self.set_setting("help_text", text, description="Bot /help response message")
 
-    def get_all_settings(self) -> Dict[str, Any]:
-        """Fetch all stored bot settings."""
-        settings = {}
-        for doc in self.settings_col.stream():
-            d = doc.to_dict()
-            settings[d.get("key", doc.id)] = d.get("value")
-        return settings
-
     # =========================================================================
-    # SEARCH LOGS
+    # SEARCH LOGS & STATS
     # =========================================================================
 
     def log_search(
@@ -829,7 +1112,7 @@ class DatabaseManager:
         user_id: Union[int, str],
         keyword: str,
         results_count: int,
-        top_result_id: Optional[str] = None
+        top_result_id: Optional[str] = None,
     ) -> str:
         """Log a user search query."""
         data = {
@@ -843,21 +1126,12 @@ class DatabaseManager:
         _, doc_ref = self.search_logs_col.add(data)
         return doc_ref.id
 
-    def get_recent_search_logs(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Retrieve recent search logs for analytics."""
-        query = self.search_logs_col.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
-        logs = []
-        for doc in query.stream():
-            item = doc.to_dict()
-            item["id"] = doc.id
-            logs.append(item)
-        return logs
-
     def get_top_searched_keywords(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Aggregate popular search keywords."""
-        logs = self.get_recent_search_logs(limit=200)
+        """Aggregate popular search queries."""
+        logs_query = self.search_logs_col.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(200)
         counts: Dict[str, int] = {}
-        for l in logs:
+        for doc in logs_query.stream():
+            l = doc.to_dict() or {}
             kw = l.get("keyword_lower", "")
             if kw:
                 counts[kw] = counts.get(kw, 0) + 1
