@@ -18,7 +18,8 @@ MAIN_CHANNEL_ID = int(os.getenv("MAIN_CHANNEL_ID", "0"))
 BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "0"))
 MAIN_CHANNEL_LINK = os.getenv("MAIN_CHANNEL_LINK", "https://t.me/")
 BACKUP_CHANNEL_LINK = os.getenv("BACKUP_CHANNEL_LINK", "https://t.me/")
-
+# Default target channel for poster/main content
+TARGET_CHANNEL_ID = int(os.getenv("int(os.getenv("BACKUP_CHANNEL_ID", "0"))
 # All 6 Storage Private Channels
 CHANNELS = {
     "480p_Hindi": int(os.getenv("CH_480P_HINDI", "0")),
