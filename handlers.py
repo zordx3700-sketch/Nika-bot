@@ -1,40 +1,47 @@
+# FILE: handlers.py
+# CHANGE: Fixed category navigation flow, added 4-button menu + Request system, Series/Season/Episode flow, and ASCII styled URL page
+
 """
-Production-Ready User Flow Handlers for Telegram Bot.
+Production-Ready User Flow Handlers for Telegram Anime & Media Bot.
 
 Compatible with:
 - Python: 3.11+
 - python-telegram-bot: >=22.0, <23.0
 
-Complete USER flow:
-1. /start & Deep-Linking / Verification:
-   - Registers user in Firestore
-   - Verifies channel membership on MAIN_CHANNEL_ID and BACKUP_CHANNEL_ID
-   - If not joined: Shows Join Channel buttons with Verify & Continue
-2. Navigation & Categories:
-   - Category browser with pagination
-   - Titles under category
-3. Search & Smart Suggestions:
-   - Text message search & /search command
-   - Search suggestions: "Do you mean...?" with interactive title buttons
-   - Logs searches to Firestore
-4. Title & Media Selection Flow:
-   - Select Title -> dynamically queries only available languages that have configured URLs
-   - Select Language -> dynamically queries only available resolutions for that title+language
-   - Select Resolution -> displays independent Watch (url=) and/or Download (url=) buttons
-   - Pure redirection: Bot never downloads files itself.
-5. Full error handling & graceful fallback notifications.
+Complete USER Flow:
+1. /start & Channel Membership:
+   - Mandatory membership check on MAIN_CHANNEL_ID and BACKUP_CHANNEL_ID.
+   - User registration in Firestore.
+2. Home Menu (4 core buttons: Titles, Categories, Language, Help + 📩 Request button).
+3. 📂 Categories:
+   - Browse categories -> View titles inside category (does NOT redirect back to /start).
+4. 🎬 Titles & 🌐 Languages browsing.
+5. 🔍 Multi-Strategy Search & Suggestions (Title, Keywords, Aliases, Substrings).
+6. 📺 Normal vs Series Flow:
+   - Normal: Title -> Language -> Resolution -> URLs
+   - Series: Title -> Season -> Episode -> Language -> Resolution -> URLs
+7. 🔗 URL Page:
+   - Premium formatted header box:
+     ╭━━━━━━━━━━━━━━━━━━━━╮
+            🎬 TITLE
+     ╰━━━━━━━━━━━━━━━━━━━━╯
+   - Multiple Watch & Download buttons opening external URLs directly.
+8. 📩 Media Request System:
+   - User submits request -> Saved in Firestore -> Forwarded to ADMIN_ID.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -43,38 +50,41 @@ from config import (
     ADMIN_ID,
     BACKUP_CHANNEL_ID,
     BACKUP_CHANNEL_LINK,
-    BOT_TOKEN,
     MAIN_CHANNEL_ID,
     MAIN_CHANNEL_LINK,
 )
 from database import DatabaseManager
 from keyboards import (
+    cancel_action_keyboard,
     categories_keyboard,
+    category_titles_keyboard,
     channel_links_keyboard,
+    episodes_selection_keyboard,
+    languages_browse_keyboard,
     languages_selection_keyboard,
-    media_actions_keyboard,
+    media_multi_urls_keyboard,
     resolutions_selection_keyboard,
-    search_suggestions_keyboard,
-    title_list_keyboard,
-    user_help_keyboard,
+    search_results_keyboard,
+    seasons_selection_keyboard,
+    titles_all_keyboard,
     user_main_menu_keyboard,
 )
 
 logger = logging.getLogger("UserHandlers")
 
-# Initialize shared database manager
+# Shared database instance
 db = DatabaseManager()
+
+# Conversation states
+STATE_USER_REQUEST_INPUT = 1
 
 
 # =========================================================================
-# CHANNEL MEMBERSHIP VERIFICATION
+# MEMBERSHIP VERIFICATION
 # =========================================================================
 
 async def is_user_member(bot, user_id: int, channel_id: int) -> bool:
-    """
-    Check if the user is a member/administrator/creator in the given channel.
-    Returns True if user is admin or if membership is verified.
-    """
+    """Check if user is a member of the required channel."""
     if user_id == ADMIN_ID:
         return True
 
@@ -86,73 +96,53 @@ async def is_user_member(bot, user_id: int, channel_id: int) -> bool:
             ChatMemberStatus.OWNER,
         ]
     except Exception as e:
-        logger.warning(
-            "Could not check membership for user %s in channel %s: %s",
-            user_id,
-            channel_id,
-            e,
-        )
-        # If bot lacks permissions or channel is misconfigured, avoid hard-locking users
+        logger.warning("Membership check exception for %s in %s: %s", user_id, channel_id, e)
         return True
 
 
 async def check_force_sub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Verifies that the user has joined both MAIN and BACKUP channels.
-    If not, responds with direct join links and returns False.
-    """
+    """Ensure user is subscribed to both MAIN and BACKUP channels."""
     user = update.effective_user
     if not user:
         return False
 
-    is_main_member = await is_user_member(context.bot, user.id, MAIN_CHANNEL_ID)
-    is_backup_member = await is_user_member(context.bot, user.id, BACKUP_CHANNEL_ID)
+    is_main = await is_user_member(context.bot, user.id, MAIN_CHANNEL_ID)
+    is_backup = await is_user_member(context.bot, user.id, BACKUP_CHANNEL_ID)
 
-    if is_main_member and is_backup_member:
+    if is_main and is_backup:
         return True
 
-    # User has not joined both channels
     msg_text = (
         "⚠️ *Channel Membership Required*\n\n"
         "To use this bot and access media links, please join our official updates and backup channels below.\n\n"
-        "Click the buttons to join, then tap **Verify & Continue**."
+        "Tap the buttons to join, then tap **Verify Membership**."
     )
-    reply_markup = channel_links_keyboard(
+    markup = channel_links_keyboard(
         main_link=MAIN_CHANNEL_LINK,
         backup_link=BACKUP_CHANNEL_LINK,
-        try_again_callback="verify_sub",
+        try_again_callback="chk_membership",
     )
 
     if update.callback_query:
         try:
-            await update.callback_query.answer(
-                "⚠️ Please join both channels first!", show_alert=True
-            )
+            await update.callback_query.answer("⚠️ Please join both channels first!", show_alert=True)
             await update.callback_query.edit_message_text(
-                text=msg_text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN,
+                text=msg_text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
             )
         except Exception:
             await context.bot.send_message(
-                chat_id=user.id,
-                text=msg_text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN,
+                chat_id=user.id, text=msg_text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
             )
     elif update.message:
         await update.message.reply_text(
-            text=msg_text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
+            text=msg_text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True
         )
 
     return False
 
 
 # =========================================================================
-# START & MAIN MENU COMMANDS
+# START COMMAND & HOME MENU
 # =========================================================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -161,7 +151,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not user:
         return
 
-    # 1. Register or update user in database
+    # Register user in Firestore
     db.register_user(
         user_id=user.id,
         username=user.username,
@@ -170,71 +160,54 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         language_code=user.language_code,
     )
 
-    # 2. Check channel membership
+    # Check channel subscription
     if not await check_force_sub(update, context):
         return
 
-    # 3. Check for deep linking arguments (e.g. /start t_XYZ)
+    # Deep-linking check (e.g. /start t_XYZ)
     if context.args and len(context.args) > 0:
         arg = context.args[0]
         if arg.startswith("t_"):
             title_id = arg.replace("t_", "")
-            await show_title_details(update, context, title_id=title_id)
+            await show_title_entry(update, context, title_id)
             return
 
-    # 4. Display Main Menu
-    welcome_text = (
+    text = (
         f"👋 Hello, *{user.first_name}*!\n\n"
-        "🎬 *Welcome to the Media Bot*\n"
-        "Find, stream, and download your favorite movies, series, and anime with instant high-speed direct links.\n\n"
-        "👇 *Choose an option below or simply send any title to search:*"
+        "🎬 *Welcome to Anime & Media Bot*\n"
+        "Stream and download your favorite movies, web series, and anime with high-speed direct links.\n\n"
+        "👇 *Select an option below or send any title name to search:*"
     )
-    reply_markup = user_main_menu_keyboard()
+    markup = user_main_menu_keyboard()
 
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            text=welcome_text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.callback_query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
     elif update.message:
-        await update.message.reply_text(
-            text=welcome_text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /help command and help button."""
+    """Display bot help guide."""
     if not await check_force_sub(update, context):
         return
 
-    help_text = db.get_help_text()
-    reply_markup = user_help_keyboard()
+    text = db.get_help_text()
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton(text="🏠 Home", callback_data="nav_home")]])
 
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            text=help_text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.callback_query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
     elif update.message:
-        await update.message.reply_text(
-            text=help_text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
 
 
 # =========================================================================
-# CATEGORIES & BROWSING FLOW
+# CATEGORIES & TITLES BROWSING
 # =========================================================================
 
-async def categories_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show paginated categories list."""
+async def user_categories_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display paginated list of categories."""
     query = update.callback_query
     if not query:
         return
@@ -243,7 +216,6 @@ async def categories_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not await check_force_sub(update, context):
         return
 
-    # Extract page from callback_data (e.g., u_cats:1)
     data = query.data or "u_cats:1"
     page = 1
     if ":" in data:
@@ -252,26 +224,25 @@ async def categories_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         except ValueError:
             page = 1
 
-    categories = db.get_all_categories(only_enabled=True)
-    if not categories:
+    cats = db.get_all_categories(only_enabled=True)
+    if not cats:
         await query.edit_message_text(
-            "📂 *Categories*\n\nNo categories are available right now.",
+            "📂 *Categories*\n\nNo categories available currently.",
             reply_markup=user_main_menu_keyboard(),
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    text = "📂 *Select a Category to Browse:*"
-    reply_markup = categories_keyboard(categories, page=page, page_size=8)
+    markup = categories_keyboard(cats, page=page, page_size=8)
     await query.edit_message_text(
-        text=text,
-        reply_markup=reply_markup,
+        "📂 *Select a Category to Browse:*",
+        reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
-async def category_titles_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show titles under a selected category."""
+async def user_category_titles_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show titles belonging ONLY to the selected category."""
     query = update.callback_query
     if not query:
         return
@@ -281,139 +252,172 @@ async def category_titles_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     # Format: ucat:<category_id>:<page>
-    parts = (query.data or "").split(":")
-    if len(parts) < 2:
-        return
-
+    parts = query.data.split(":")
     cat_id = parts[1]
-    page = 1
-    if len(parts) >= 3:
-        try:
-            page = int(parts[2].replace("p", ""))
-        except ValueError:
-            page = 1
+    page = int(parts[2]) if len(parts) >= 3 else 1
 
-    category = db.get_category(cat_id)
-    cat_name = category.get("name", "Category") if category else "Category"
+    cat_doc = db.get_category(cat_id)
+    cat_name = cat_doc.get("name", "Category") if cat_doc else "Category"
 
-    titles = db.get_titles_by_category(cat_id, limit=100)
+    titles = db.get_titles_by_category(cat_id, only_published=True, limit=100)
     if not titles:
-        text = f"📂 *Category:* {cat_name}\n\nNo titles found in this category yet."
-        await query.edit_message_text(
-            text=text,
-            reply_markup=title_list_keyboard([], back_cb="u_cats:1"),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        text = f"📂 *Category:* `{cat_name}`\n\nNo titles available in this category yet."
+        markup = category_titles_keyboard(cat_id, cat_name, [], page=1)
+        await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
         return
 
-    text = f"📂 *Category:* {cat_name}\n\nSelect a title to view available qualities & links:"
-    reply_markup = title_list_keyboard(
-        titles=titles,
-        back_cb="u_cats:1",
-        page=page,
-        page_size=6,
-        prefix="utitle",
-    )
-    await query.edit_message_text(
-        text=text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    text = f"📂 *Category:* `{cat_name}`\n\nSelect a title to view episodes/qualities:"
+    markup = category_titles_keyboard(cat_id, cat_name, titles, page=page, page_size=8)
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
 
 
-# =========================================================================
-# SEARCH & SUGGESTIONS FLOW
-# =========================================================================
-
-async def prompt_search_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt user to type their search query."""
+async def user_titles_all_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show all titles across categories."""
     query = update.callback_query
     if not query:
         return
     await query.answer()
 
-    text = (
-        "🔍 *Search Media Library*\n\n"
-        "Send the title or name of the movie/series you want to watch.\n\n"
-        "_Example: Naruto, Avengers, Spider-Man, Jujutsu Kaisen_"
-    )
+    if not await check_force_sub(update, context):
+        return
+
+    data = query.data or "u_titles:1"
+    page = int(data.split(":")[1]) if ":" in data else 1
+
+    titles = db.get_all_titles(only_published=True, limit=150)
+    markup = titles_all_keyboard(titles, page=page, page_size=8)
     await query.edit_message_text(
-        text=text,
-        reply_markup=user_main_menu_keyboard(),
+        "🎬 *All Titles Library*\n\nSelect a title to browse options:",
+        reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
+async def user_languages_browse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Browse by language."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    if not await check_force_sub(update, context):
+        return
+
+    data = query.data or "u_langs:1"
+    page = int(data.split(":")[1]) if ":" in data else 1
+
+    langs = db.get_available_languages(only_enabled=True)
+    markup = languages_browse_keyboard(langs, page=page, page_size=8)
+    await query.edit_message_text(
+        "🌐 *Browse by Audio / Language*\n\nSelect a language to discover available titles:",
+        reply_markup=markup,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+# =========================================================================
+# SEARCH ENGINE
+# =========================================================================
+
 async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle natural text messages from users as search queries.
-    Provides smart match suggestions (e.g. 'Do you mean...?')
-    """
+    """Handle text search queries with smart matching and suggestions."""
     if not update.message or not update.message.text:
         return
 
     user = update.effective_user
-    if not user:
+    if not user or not await check_force_sub(update, context):
         return
 
-    # Check force subscribe
-    if not await check_force_sub(update, context):
+    query_text = update.message.text.strip()
+    if query_text.startswith("/"):
         return
 
-    search_query = update.message.text.strip()
-    if search_query.startswith("/"):
-        return  # Ignore unrecognized commands
-
-    # Perform multi-strategy search with automatic logging
-    results = db.search_titles(
-        query_str=search_query,
-        limit=10,
-        user_id=user.id,
-    )
+    results = db.search_titles(query_str=query_text, limit=10, user_id=user.id)
 
     if not results:
-        # No match found
-        not_found_text = (
-            f"❌ *No results found for:* `{search_query}`\n\n"
-            "• Please check spelling and try again\n"
-            "• Try using fewer keywords (e.g., 'Naruto' instead of 'Naruto Episode 1')\n"
-            "• Browse categories from the main menu"
+        text = (
+            f"❌ *No results found for:* `{query_text}`\n\n"
+            "• Please check spelling and try again.\n"
+            "• Or tap **📩 Request** to request this title from admin!"
         )
-        await update.message.reply_text(
-            text=not_found_text,
-            reply_markup=user_main_menu_keyboard(),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.message.reply_text(text=text, reply_markup=user_main_menu_keyboard(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # If single exact match is found with high confidence
-    if len(results) == 1 and results[0].get("title_lower") == search_query.lower():
-        title_id = results[0]["id"]
-        await show_title_details(update, context, title_id=title_id)
+    if len(results) == 1 and results[0].get("title_lower") == query_text.lower():
+        await show_title_entry(update, context, results[0]["id"])
         return
 
-    # Multiple or partial results: "Do you mean...?" Suggestions
-    top_title = results[0].get("title", search_query)
-    suggestions_text = (
-        f"🔍 *Results for:* `{search_query}`\n\n"
+    top_title = results[0].get("title", query_text)
+    text = (
+        f"🔍 *Search results for:* `{query_text}`\n\n"
         f"💡 *Did you mean:* **{top_title}**?\n\n"
-        "Select the exact title from the list below:"
+        "Tap a title below to view:"
     )
-    reply_markup = search_suggestions_keyboard(results, query_text=search_query)
-
-    await update.message.reply_text(
-        text=suggestions_text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    markup = search_results_keyboard(results)
+    await update.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
 
 
 # =========================================================================
-# TITLE DETAILS & DYNAMIC MEDIA SELECTION FLOW
+# TITLE / SERIES / SEASON / EPISODE / QUALITY FLOW
 # =========================================================================
 
-async def title_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle title selection from keyboard."""
+async def show_title_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, title_id: str) -> None:
+    """Entry point when a title is selected (routes to Series flow or Normal flow)."""
+    title_doc = db.get_title(title_id)
+    if not title_doc or not title_doc.get("is_published", True):
+        msg = "⚠️ This title is currently unavailable."
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg, reply_markup=user_main_menu_keyboard())
+        elif update.message:
+            await update.message.reply_text(msg, reply_markup=user_main_menu_keyboard())
+        return
+
+    title_name = title_doc.get("title", "Title")
+    content_type = title_doc.get("content_type", "normal")
+
+    if content_type == "series":
+        # Series Flow -> Show Seasons
+        seasons = db.get_seasons(title_id)
+        if not seasons:
+            text = (
+                f"📺 *{title_name}*\n\n"
+                "⚠️ *Seasons are being uploaded!*\n"
+                "Please check back shortly or request via 📩 Request."
+            )
+            markup = user_main_menu_keyboard()
+        else:
+            text = f"📺 *{title_name}*\n\nSelect a season to view episodes:"
+            markup = seasons_selection_keyboard(title_id, seasons, back_cb="nav_home")
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+        elif update.message:
+            await update.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+    else:
+        # Normal Flow -> Show Languages with Links
+        combos = db.get_all_media_combos_for_title(title_id)
+        valid_combos = [c for c in combos if c.get("watch_urls") or c.get("download_urls")]
+
+        if not valid_combos:
+            text = (
+                f"🎬 *{title_name}*\n\n"
+                "⚠️ *Links are being uploaded!*\n"
+                "Please check back shortly or request via 📩 Request."
+            )
+            markup = user_main_menu_keyboard()
+        else:
+            available_langs = sorted(list({c.get("language", "") for c in valid_combos if c.get("language")}))
+            text = f"🎬 *{title_name}*\n\n🗣️ *Select Audio / Language:*"
+            markup = languages_selection_keyboard(available_langs, title_id=title_id, back_cb="nav_home")
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+        elif update.message:
+            await update.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+
+async def user_title_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback for ut:<title_id>."""
     query = update.callback_query
     if not query:
         return
@@ -422,270 +426,311 @@ async def title_detail_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not await check_force_sub(update, context):
         return
 
-    # Format: utitle:<title_id>
-    parts = (query.data or "").split(":")
-    if len(parts) < 2:
-        return
-
-    title_id = parts[1]
-    await show_title_details(update, context, title_id=title_id)
+    title_id = query.data.split(":")[1]
+    await show_title_entry(update, context, title_id)
 
 
-async def show_title_details(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    title_id: str,
-    back_cb: str = "u_cats:1",
-) -> None:
-    """
-    Display title overview and show ONLY the languages that have media URLs
-    configured for this title.
-    """
-    title_data = db.get_title(title_id)
-    if not title_data or not title_data.get("is_published", True):
-        msg = "⚠️ This title is currently unavailable or has been removed."
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                msg, reply_markup=user_main_menu_keyboard()
-            )
-        elif update.message:
-            await update.message.reply_text(
-                msg, reply_markup=user_main_menu_keyboard()
-            )
-        return
-
-    title_name = title_data.get("title", "Untitled")
-    year = title_data.get("release_year")
-    desc = title_data.get("description", "")
-
-    # Query all media URL combinations for this title
-    media_items = db.get_media_urls_for_title(title_id)
-    
-    # Filter only items that have at least watch_url or download_url
-    valid_media = [
-        m for m in media_items
-        if (m.get("watch_url") and m.get("watch_url").strip())
-        or (m.get("download_url") and m.get("download_url").strip())
-    ]
-
-    if not valid_media:
-        no_links_text = (
-            f"🎬 *{title_name}*" + (f" ({year})" if year else "") + "\n\n"
-            f"{desc}\n\n"
-            "⚠️ *Links coming soon!*\nNo active watch or download links are available for this title yet."
-        )
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                text=no_links_text,
-                reply_markup=title_list_keyboard([], back_cb=back_cb),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        elif update.message:
-            await update.message.reply_text(
-                text=no_links_text,
-                reply_markup=title_list_keyboard([], back_cb=back_cb),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        return
-
-    # Extract distinct languages that actually have configured URLs
-    available_langs: List[str] = []
-    for item in valid_media:
-        l_name = item.get("language", "").strip()
-        if l_name and l_name not in available_langs:
-            available_langs.append(l_name)
-
-    caption = (
-        f"🎬 *{title_name}*" + (f" ({year})" if year else "") + "\n\n"
-        + (f"📝 _{desc}_\n\n" if desc else "")
-        + "🗣️ *Step 1/2: Select Audio / Language:*"
-    )
-
-    reply_markup = languages_selection_keyboard(
-        languages=available_langs,
-        title_id=title_id,
-        back_cb=back_cb,
-    )
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=caption,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    elif update.message:
-        await update.message.reply_text(
-            text=caption,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
-
-async def language_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle language selection for a title.
-    Show ONLY the resolutions that have URLs configured for this title + language.
-    """
+async def user_season_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback for us_s:<title_id>:<season_id>."""
     query = update.callback_query
     if not query:
         return
     await query.answer()
 
-    if not await check_force_sub(update, context):
-        return
-
-    # Format: ulang:<title_id>:<language>
-    parts = (query.data or "").split(":")
-    if len(parts) < 3:
-        return
-
+    parts = query.data.split(":")
     title_id = parts[1]
-    selected_language = parts[2]
+    season_id = parts[2]
 
-    title_data = db.get_title(title_id)
-    title_name = title_data.get("title", "Title") if title_data else "Title"
+    title_doc = db.get_title(title_id)
+    season_doc = db.get_season(title_id, season_id)
+    t_name = title_doc.get("title", "Series") if title_doc else "Series"
+    s_name = season_doc.get("season_name", "Season") if season_doc else "Season"
 
-    # Query all media URL combinations for this title
-    media_items = db.get_media_urls_for_title(title_id)
+    episodes = db.get_episodes(title_id, season_id)
+    if not episodes:
+        text = f"📺 *{t_name}* • `{s_name}`\n\n⚠️ No episodes uploaded in this season yet."
+        markup = seasons_selection_keyboard(title_id, db.get_seasons(title_id), back_cb="nav_home")
+    else:
+        text = f"📺 *{t_name}* • `{s_name}`\n\nSelect an episode:"
+        markup = episodes_selection_keyboard(title_id, season_id, episodes, back_cb=f"ut:{title_id}")
 
-    # Filter items matching selected language that have valid URLs
-    valid_resols: List[str] = []
-    for m in media_items:
-        if m.get("language", "").strip().lower() == selected_language.strip().lower():
-            if (m.get("watch_url") and m.get("watch_url").strip()) or (
-                m.get("download_url") and m.get("download_url").strip()
-            ):
-                r_name = m.get("resolution", "").strip()
-                if r_name and r_name not in valid_resols:
-                    valid_resols.append(r_name)
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
 
-    if not valid_resols:
-        await query.edit_message_text(
-            f"🎬 *{title_name}*\n\n⚠️ No resolutions found for language *{selected_language}*.",
-            reply_markup=languages_selection_keyboard([], title_id=title_id),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+
+async def user_episode_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback for us_ep:<title_id>:<season_id>:<episode_id>."""
+    query = update.callback_query
+    if not query:
         return
+    await query.answer()
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    season_id = parts[2]
+    episode_id = parts[3]
+
+    title_doc = db.get_title(title_id)
+    season_doc = db.get_season(title_id, season_id)
+    ep_doc = db.get_episode(title_id, season_id, episode_id)
+
+    t_name = title_doc.get("title", "Series") if title_doc else "Series"
+    s_name = season_doc.get("season_name", "Season") if season_doc else "Season"
+    ep_name = ep_doc.get("episode_title", "Episode") if ep_doc else "Episode"
+
+    combos = db.get_all_media_combos_for_title(title_id, season_id=season_id, episode_id=episode_id)
+    valid_combos = [c for c in combos if c.get("watch_urls") or c.get("download_urls")]
+
+    if not valid_combos:
+        text = (
+            f"📺 *{t_name}* • `{s_name}`\n"
+            f"🎬 *{ep_name}*\n\n"
+            "⚠️ Links are being uploaded for this episode! Please check back shortly."
+        )
+        markup = episodes_selection_keyboard(
+            title_id, season_id, db.get_episodes(title_id, season_id), back_cb=f"ut:{title_id}"
+        )
+    else:
+        available_langs = sorted(list({c.get("language", "") for c in valid_combos if c.get("language")}))
+        text = (
+            f"📺 *{t_name}* • `{s_name}`\n"
+            f"🎬 *{ep_name}*\n\n"
+            "🗣️ *Select Audio / Language:*"
+        )
+        markup = languages_selection_keyboard(
+            available_langs,
+            title_id=title_id,
+            season_id=season_id,
+            episode_id=episode_id,
+            back_cb=f"us_s:{title_id}:{season_id}",
+        )
+
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+
+async def user_language_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback for ul:<title_id>:<lang> or ul:<title_id>:<season_id>:<episode_id>:<lang>."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    if len(parts) == 3:
+        # Normal title: ul:<title_id>:<lang>
+        title_id = parts[1]
+        lang = parts[2]
+        title_doc = db.get_title(title_id)
+        t_name = title_doc.get("title", "Title") if title_doc else "Title"
+
+        combos = db.get_all_media_combos_for_title(title_id)
+        valid_res = [
+            c.get("resolution", "")
+            for c in combos
+            if c.get("language", "").lower() == lang.lower() and (c.get("watch_urls") or c.get("download_urls"))
+        ]
+        text = f"🎬 *{t_name}*\n🌐 Language: `{lang}`\n\n🎞️ *Select Resolution / Quality:*"
+        markup = resolutions_selection_keyboard(
+            valid_res,
+            title_id=title_id,
+            language=lang,
+            back_cb=f"ut:{title_id}",
+        )
+    else:
+        # Series: ul:<title_id>:<season_id>:<episode_id>:<lang>
+        title_id = parts[1]
+        season_id = parts[2]
+        episode_id = parts[3]
+        lang = parts[4]
+
+        title_doc = db.get_title(title_id)
+        season_doc = db.get_season(title_id, season_id)
+        ep_doc = db.get_episode(title_id, season_id, episode_id)
+
+        t_name = title_doc.get("title", "Series") if title_doc else "Series"
+        s_name = season_doc.get("season_name", "Season") if season_doc else "Season"
+        ep_name = ep_doc.get("episode_title", "Episode") if ep_doc else "Episode"
+
+        combos = db.get_all_media_combos_for_title(title_id, season_id=season_id, episode_id=episode_id)
+        valid_res = [
+            c.get("resolution", "")
+            for c in combos
+            if c.get("language", "").lower() == lang.lower() and (c.get("watch_urls") or c.get("download_urls"))
+        ]
+        text = (
+            f"📺 *{t_name}* • `{s_name}`\n"
+            f"🎬 *{ep_name}*\n"
+            f"🌐 Language: `{lang}`\n\n"
+            "🎞️ *Select Resolution / Quality:*"
+        )
+        markup = resolutions_selection_keyboard(
+            valid_res,
+            title_id=title_id,
+            language=lang,
+            season_id=season_id,
+            episode_id=episode_id,
+            back_cb=f"us_ep:{title_id}:{season_id}:{episode_id}",
+        )
+
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+
+async def user_resolution_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display final URL page with bold box header and multiple Watch/Download buttons."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    if len(parts) == 4:
+        # Normal title: ur:<title_id>:<lang>:<res>
+        title_id = parts[1]
+        lang = parts[2]
+        res = parts[3]
+
+        title_doc = db.get_title(title_id)
+        t_name = title_doc.get("title", "Title").upper() if title_doc else "TITLE"
+
+        combo = db.get_media_url_combo(title_id, language=lang, resolution=res) or {}
+        w_urls = combo.get("watch_urls", [])
+        dl_urls = combo.get("download_urls", [])
+        w_labels = combo.get("watch_labels", [])
+        dl_labels = combo.get("download_labels", [])
+
+        # Beautiful Bold Box Title Header
+        header_text = (
+            "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+            f"       🎬 {t_name}\n"
+            "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"🌐 *Language:* `{lang}`\n"
+            f"🎞 *Quality:* `{res}`\n\n"
+            "👇 *Tap a button below to open direct external link:*"
+        )
+        markup = media_multi_urls_keyboard(
+            watch_urls=w_urls,
+            download_urls=dl_urls,
+            watch_labels=w_labels,
+            download_labels=dl_labels,
+            back_cb=f"ul:{title_id}:{lang}",
+        )
+    else:
+        # Series: ur:<title_id>:<season_id>:<episode_id>:<lang>:<res>
+        title_id = parts[1]
+        season_id = parts[2]
+        episode_id = parts[3]
+        lang = parts[4]
+        res = parts[5]
+
+        title_doc = db.get_title(title_id)
+        season_doc = db.get_season(title_id, season_id)
+        ep_doc = db.get_episode(title_id, season_id, episode_id)
+
+        t_name = title_doc.get("title", "Series").upper() if title_doc else "SERIES"
+        s_name = season_doc.get("season_name", "Season") if season_doc else "Season"
+        ep_name = ep_doc.get("episode_title", "Episode") if ep_doc else "Episode"
+
+        combo = db.get_media_url_combo(
+            title_id, language=lang, resolution=res, season_id=season_id, episode_id=episode_id
+        ) or {}
+        w_urls = combo.get("watch_urls", [])
+        dl_urls = combo.get("download_urls", [])
+        w_labels = combo.get("watch_labels", [])
+        dl_labels = combo.get("download_labels", [])
+
+        header_text = (
+            "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+            f"       📺 {t_name}\n"
+            "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"📚 *{s_name}* • 🎬 *{ep_name}*\n"
+            f"🌐 *Language:* `{lang}`\n"
+            f"🎞 *Quality:* `{res}`\n\n"
+            "👇 *Tap a button below to open direct external link:*"
+        )
+        markup = media_multi_urls_keyboard(
+            watch_urls=w_urls,
+            download_urls=dl_urls,
+            watch_labels=w_labels,
+            download_labels=dl_labels,
+            back_cb=f"ul:{title_id}:{season_id}:{episode_id}:{lang}",
+        )
+
+    await query.edit_message_text(text=header_text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+
+# =========================================================================
+# USER REQUEST SYSTEM
+# =========================================================================
+
+async def start_user_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt user to send the media title they want to request."""
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    await query.answer()
 
     text = (
-        f"🎬 *{title_name}*\n"
-        f"🗣️ *Language:* `{selected_language}`\n\n"
-        "📺 *Step 2/2: Select Quality / Resolution:*"
+        "📩 *Request Missing Media*\n\n"
+        "Please send the name of the Anime, Movie, or Web Series you would like to request:\n\n"
+        "_Example: Solo Leveling Season 2, Oppenheimer, Jujutsu Kaisen_"
     )
-    reply_markup = resolutions_selection_keyboard(
-        resolutions=valid_resols,
-        title_id=title_id,
-        language=selected_language,
-        back_cb=f"utitle:{title_id}",
-    )
-
-    await query.edit_message_text(
-        text=text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    markup = cancel_action_keyboard("cancel_req")
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+    return STATE_USER_REQUEST_INPUT
 
 
-async def resolution_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle resolution selection.
-    Fetch and display the independent Watch and Download buttons with direct external URLs.
-    """
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-
-    if not await check_force_sub(update, context):
-        return
-
-    # Format: ures:<title_id>:<language>:<resolution>
-    parts = (query.data or "").split(":")
-    if len(parts) < 4:
-        return
-
-    title_id = parts[1]
-    language = parts[2]
-    resolution = parts[3]
-
-    title_data = db.get_title(title_id)
-    title_name = title_data.get("title", "Media") if title_data else "Media"
-
-    media = db.get_media_url(title_id, language=language, resolution=resolution)
-    if not media:
-        await query.edit_message_text(
-            "⚠️ The requested link combination is no longer available.",
-            reply_markup=user_main_menu_keyboard(),
-        )
-        return
-
-    watch_url = (media.get("watch_url") or "").strip()
-    download_url = (media.get("download_url") or "").strip()
-    file_size = media.get("file_size", "").strip()
-    extra_note = media.get("extra_note", "").strip()
-
-    text_parts = [
-        f"🍿 *{title_name}*",
-        f"🗣️ *Language:* {language}",
-        f"📺 *Quality:* {resolution}",
-    ]
-    if file_size:
-        text_parts.append(f"📦 *File Size:* {file_size}")
-    if extra_note:
-        text_parts.append(f"ℹ️ *Note:* {extra_note}")
-
-    text_parts.append("\n🚀 *Your links are ready! Tap a button below to open:*")
-    final_text = "\n".join(text_parts)
-
-    reply_markup = media_actions_keyboard(
-        watch_url=watch_url,
-        download_url=download_url,
-        back_cb=f"ulang:{title_id}:{language}",
-    )
-
-    await query.edit_message_text(
-        text=final_text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-# =========================================================================
-# NAVIGATION & COMMON CALLBACKS
-# =========================================================================
-
-async def verify_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Callback when user clicks 'Verify & Continue'."""
-    query = update.callback_query
-    if not query:
-        return
+async def handle_user_request_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle text input for request, save in Firestore, and notify Admin."""
+    if not update.message or not update.message.text:
+        return STATE_USER_REQUEST_INPUT
 
     user = update.effective_user
-    if not user:
-        return
+    req_text = update.message.text.strip()
+    if not req_text or not user:
+        return ConversationHandler.END
 
-    is_main = await is_user_member(context.bot, user.id, MAIN_CHANNEL_ID)
-    is_backup = await is_user_member(context.bot, user.id, BACKUP_CHANNEL_ID)
+    # 1. Save to Firestore
+    db.save_user_request(
+        user_id=user.id,
+        first_name=user.first_name or "User",
+        username=user.username or "",
+        request_text=req_text,
+    )
 
-    if is_main and is_backup:
-        await query.answer("✅ Verification successful!", show_alert=True)
-        await start_command(update, context)
-    else:
-        await query.answer(
-            "❌ You have not joined both channels yet. Please join and try again.",
-            show_alert=True,
+    # 2. Forward notification to ADMIN_ID
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    admin_notify = (
+        "📩 *NEW USER MEDIA REQUEST*\n\n"
+        f"👤 *User:* {user.first_name} {user.last_name or ''} (@{user.username or 'None'})\n"
+        f"🆔 *Telegram ID:* `{user.id}`\n"
+        f"🎬 *Request:* `{req_text}`\n"
+        f"⏰ *Time:* `{now_str}`"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=admin_notify,
+            parse_mode=ParseMode.MARKDOWN,
         )
+    except Exception as e:
+        logger.warning("Could not forward request to ADMIN_ID %s: %s", ADMIN_ID, e)
+
+    # 3. Confirmation to user
+    await update.message.reply_text(
+        "✅ *Your request has been sent to the admin!*\n\n"
+        "Thank you! We will review and upload it soon.",
+        reply_markup=user_main_menu_keyboard(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
 
 
-async def nav_home_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Return to main menu."""
-    await start_command(update, context)
-
-
-async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Empty callback handler for static page badges."""
-    if update.callback_query:
-        await update.callback_query.answer()
+async def cancel_user_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel media request."""
+    query = update.callback_query
+    if query:
+        await query.answer("Request cancelled.")
+        await start_command(update, context)
+    return ConversationHandler.END
 
 
 # =========================================================================
@@ -693,14 +738,13 @@ async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # =========================================================================
 
 async def error_handler(update: Optional[object], context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and notify user gracefully."""
-    logger.error("Exception while handling an update: %s", context.error, exc_info=context.error)
-
+    """Global error catcher."""
+    logger.error("Exception in update: %s", context.error, exc_info=context.error)
     if isinstance(update, Update) and update.effective_chat:
         try:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="⚠️ *An unexpected error occurred.* Please try again with /start.",
+                text="⚠️ *An unexpected error occurred.* Please restart with /start.",
                 reply_markup=user_main_menu_keyboard(),
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -709,38 +753,63 @@ async def error_handler(update: Optional[object], context: ContextTypes.DEFAULT_
 
 
 # =========================================================================
-# HANDLER REGISTRATION
+# REGISTRATION
 # =========================================================================
 
 def register_user_handlers(app: Application) -> None:
-    """Register all user-facing command, message, and callback handlers."""
+    """Register all user flows and conversation handlers."""
+    # Request ConversationHandler
+    req_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_user_request, pattern="^u_request$")
+        ],
+        states={
+            STATE_USER_REQUEST_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_request_input)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_user_request, pattern="^cancel_req$"),
+            CommandHandler("cancel", cancel_user_request),
+        ],
+        per_chat=True,
+    )
+    app.add_handler(req_conv)
+
     # Commands
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("search", prompt_search_callback))
 
-    # Navigation & Verification callbacks
-    app.add_handler(CallbackQueryHandler(verify_sub_callback, pattern="^verify_sub$"))
-    app.add_handler(CallbackQueryHandler(nav_home_callback, pattern="^nav_home$"))
-    app.add_handler(CallbackQueryHandler(noop_callback, pattern="^noop$"))
+    # Core Navigation & Verification callbacks
+    app.add_handler(CallbackQueryHandler(start_command, pattern="^(nav_home|chk_membership)$"))
     app.add_handler(CallbackQueryHandler(help_command, pattern="^u_help$"))
 
-    # Categories & Browsing callbacks
-    app.add_handler(CallbackQueryHandler(categories_callback, pattern="^u_cats"))
-    app.add_handler(CallbackQueryHandler(category_titles_callback, pattern="^ucat:"))
+    # Categories & Titles Callbacks
+    app.add_handler(CallbackQueryHandler(user_categories_list, pattern="^u_cats"))
+    app.add_handler(CallbackQueryHandler(user_category_titles_view, pattern="^ucat:"))
+    app.add_handler(CallbackQueryHandler(user_titles_all_view, pattern="^u_titles:"))
+    app.add_handler(CallbackQueryHandler(user_languages_browse, pattern="^u_langs:"))
 
-    # Search callbacks
-    app.add_handler(CallbackQueryHandler(prompt_search_callback, pattern="^u_search$"))
+    # Title & Series Hierarchy
+    app.add_handler(CallbackQueryHandler(user_title_click, pattern="^ut:"))
+    app.add_handler(CallbackQueryHandler(user_season_click, pattern="^us_s:"))
+    app.add_handler(CallbackQueryHandler(user_episode_click, pattern="^us_ep:"))
+    app.add_handler(CallbackQueryHandler(user_language_click, pattern="^ul:"))
+    app.add_handler(CallbackQueryHandler(user_resolution_click, pattern="^ur:"))
 
-    # Title & Media Selection callbacks
-    app.add_handler(CallbackQueryHandler(title_detail_callback, pattern="^utitle:"))
-    app.add_handler(CallbackQueryHandler(language_select_callback, pattern="^ulang:"))
-    app.add_handler(CallbackQueryHandler(resolution_select_callback, pattern="^ures:"))
-
-    # Natural text message search handler
+    # Search query callback (filter by language)
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, text_search_handler)
+        CallbackQueryHandler(
+            lambda u, c: text_search_handler(
+                type("Obj", (object,), {"message": type("M", (object,), {"text": u.callback_query.data.split(":")[1]})()})(),
+                c,
+            ),
+            pattern="^usrch_lang:",
+        )
     )
+
+    # Text Search fallback
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_search_handler))
 
     # Error handler
     app.add_error_handler(error_handler)
