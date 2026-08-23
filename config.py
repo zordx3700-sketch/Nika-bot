@@ -1,37 +1,81 @@
 import os
-import sys
-from dotenv import load_dotenv
 
-load_dotenv()
 
-# Securely load Telegram Bot Token
-RAW_TOKEN = os.getenv("BOT_TOKEN")
-if not RAW_TOKEN:
-    print("ERROR: BOT_TOKEN is missing from Environment Variables!")
-    sys.exit(1)
+def get_int(name: str, default: int = 0) -> int:
+    value = os.getenv(name, str(default)).strip()
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
-BOT_TOKEN = RAW_TOKEN.strip().strip('"').strip("'")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Channel IDs
-MAIN_CHANNEL_ID = int(os.getenv("MAIN_CHANNEL_ID", "0"))
-BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "0"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Target Channel set to Backup Channel
-TARGET_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "0"))
+ADMIN_ID = get_int("ADMIN_ID")
 
-# Links
-MAIN_CHANNEL_LINK = os.getenv("MAIN_CHANNEL_LINK", "https://t.me/nikasofficial")
-BACKUP_CHANNEL_LINK = os.getenv("BACKUP_CHANNEL_LINK", "https://t.me/nikasbackup")
+MAIN_CHANNEL_ID = get_int("MAIN_CHANNEL_ID")
+BACKUP_CHANNEL_ID = get_int("BACKUP_CHANNEL_ID")
 
-# All 6 Video Storage Channels
-CHANNELS = {
-    "480p_Hindi": int(os.getenv("CH_480P_HINDI", "0")),
-    "480p_English": int(os.getenv("CH_480P_ENGLISH", "0")),
-    "720p_Hindi": int(os.getenv("CH_720P_HINDI", "0")),
-    "720p_English": int(os.getenv("CH_720P_ENGLISH", "0")),
-    "1080p_Hindi": int(os.getenv("CH_1080P_HINDI", "0")),
-    "1080p_English": int(os.getenv("CH_1080P_ENGLISH", "0")),
+MAIN_CHANNEL_LINK = os.getenv("MAIN_CHANNEL_LINK", "").strip()
+BACKUP_CHANNEL_LINK = os.getenv("BACKUP_CHANNEL_LINK", "").strip()
+
+# Private content channels
+CHANNEL_480_HINDI = get_int("CHANNEL_480_HINDI")
+CHANNEL_480_ENGLISH = get_int("CHANNEL_480_ENGLISH")
+
+CHANNEL_720_HINDI = get_int("CHANNEL_720_HINDI")
+CHANNEL_720_ENGLISH = get_int("CHANNEL_720_ENGLISH")
+
+CHANNEL_1080_HINDI = get_int("CHANNEL_1080_HINDI")
+CHANNEL_1080_ENGLISH = get_int("CHANNEL_1080_ENGLISH")
+
+# Optional: poster source channel
+POSTER_CHANNEL_ID = get_int("POSTER_CHANNEL_ID")
+
+FIREBASE_CREDENTIALS_B64 = os.getenv(
+    "FIREBASE_CREDENTIALS_B64", ""
+).strip()
+
+
+QUALITY_CHANNELS = {
+    ("480p", "Hindi"): CHANNEL_480_HINDI,
+    ("480p", "English"): CHANNEL_480_ENGLISH,
+
+    ("720p", "Hindi"): CHANNEL_720_HINDI,
+    ("720p", "English"): CHANNEL_720_ENGLISH,
+
+    ("1080p", "Hindi"): CHANNEL_1080_HINDI,
+    ("1080p", "English"): CHANNEL_1080_ENGLISH,
 }
 
-FIREBASE_CREDS_RAW = os.getenv("FIREBASE_CREDENTIALS_JSON")
+
+AVAILABLE_QUALITIES = ["480p", "720p", "1080p"]
+AVAILABLE_LANGUAGES = ["Hindi", "English"]
+
+
+def validate_config():
+    required = {
+        "BOT_TOKEN": BOT_TOKEN,
+        "ADMIN_ID": ADMIN_ID,
+        "MAIN_CHANNEL_ID": MAIN_CHANNEL_ID,
+        "BACKUP_CHANNEL_ID": BACKUP_CHANNEL_ID,
+        "MAIN_CHANNEL_LINK": MAIN_CHANNEL_LINK,
+        "BACKUP_CHANNEL_LINK": BACKUP_CHANNEL_LINK,
+        "CHANNEL_480_HINDI": CHANNEL_480_HINDI,
+        "CHANNEL_480_ENGLISH": CHANNEL_480_ENGLISH,
+        "CHANNEL_720_HINDI": CHANNEL_720_HINDI,
+        "CHANNEL_720_ENGLISH": CHANNEL_720_ENGLISH,
+        "CHANNEL_1080_HINDI": CHANNEL_1080_HINDI,
+        "CHANNEL_1080_ENGLISH": CHANNEL_1080_ENGLISH,
+    }
+
+    missing = [
+        key for key, value in required.items()
+        if not value
+    ]
+
+    if missing:
+        raise RuntimeError(
+            "Missing environment variables: "
+            + ", ".join(missing)
+        )
