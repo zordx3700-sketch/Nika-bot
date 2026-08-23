@@ -1,3 +1,6 @@
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
@@ -5,6 +8,22 @@ from config import BOT_TOKEN, ADMIN_ID, MAIN_CHANNEL_ID, BACKUP_CHANNEL_ID, MAIN
 from database import DatabaseManager
 
 logging.basicConfig(level=logging.INFO)
+
+# --- Render Port Binding Fix ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+    def log_message(self, format, *args):
+        return  # Logs পরিষ্কার রাখার জন্য
+
+def run_health_check_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+# -------------------------------
 
 # Conversation States
 ASK_NAME, ASK_POSTER, ASK_LANGS, ASK_SEASONS, ASK_EPS, ASK_RATING, ASK_EP_IDS = range(7)
@@ -308,6 +327,9 @@ async def cancel_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
+    # Start Health Check Server in background thread for Render
+    threading.Thread(target=run_health_check_server, daemon=True).start()
+    
     app = Application.builder().token(BOT_TOKEN).build()
     
     add_conv = ConversationHandler(
