@@ -13,14 +13,18 @@ if not RAW_TOKEN:
 BOT_TOKEN = RAW_TOKEN.strip().strip('"').strip("'")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Verification Channels
+# Channel IDs
 MAIN_CHANNEL_ID = int(os.getenv("MAIN_CHANNEL_ID", "0"))
 BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "0"))
-MAIN_CHANNEL_LINK = os.getenv("MAIN_CHANNEL_LINK", "https://t.me/")
-BACKUP_CHANNEL_LINK = os.getenv("BACKUP_CHANNEL_LINK", "https://t.me/")
-# Default target channel for poster/main content
-TARGET_CHANNEL_ID = int(os.getenv("int(os.getenv("BACKUP_CHANNEL_ID", "0"))
-# All 6 Storage Private Channels
+
+# Target Channel set to Backup Channel
+TARGET_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "0"))
+
+# Links
+MAIN_CHANNEL_LINK = os.getenv("MAIN_CHANNEL_LINK", "https://t.me/nikasofficial")
+BACKUP_CHANNEL_LINK = os.getenv("BACKUP_CHANNEL_LINK", "https://t.me/nikasbackup")
+
+# All 6 Video Storage Channels
 CHANNELS = {
     "480p_Hindi": int(os.getenv("CH_480P_HINDI", "0")),
     "480p_English": int(os.getenv("CH_480P_ENGLISH", "0")),
