@@ -1,5 +1,5 @@
 # FILE: keyboards.py
-# CHANGE: Added 4-button user home menu + Request button, Category titles navigation, Series/Season/Episode keyboards, and Multi-URL buttons
+# CHANGE: Strict User Home (Categories, Help, Request), Full Hierarchical Series/Normal Flow, and Persistent Add Buttons in Admin
 
 """
 Inline Keyboards Module for Telegram Anime & Media Bot.
@@ -8,14 +8,15 @@ Compatible with:
 - python-telegram-bot >=22.0, <23.0
 
 Provides:
-- User Main Menu (4 core buttons: Titles, Categories, Language, Help + 📩 Request)
+- User Main Menu (Strictly: 📂 Categories, ℹ️ Help, 📩 Request)
 - Category browsing and category-scoped title listings
-- Normal & Series (Seasons, Episodes) navigation
-- Multi-URL action buttons (Watch 1, Watch 2, Download 1, Download 2...) with direct external url=
+- Normal Flow: Category -> Title -> Language -> Regulation -> URLs
+- Series Flow: Category -> Title -> Season -> Episode -> Language -> Regulation -> URLs
+- Multi-URL action buttons (Download, Watch, Telegram, Server 2...) with direct external URL buttons
 - Admin Category-First Title creation & management
-- Admin Series & Episode management
-- Admin Multi-URL manager (Add/Delete Watch & Download URLs independently)
-- Admin Keywords, Languages, Resolutions, and Analytics dashboards
+- Admin Seasons & Episodes management with persistent ➕ Add Season / ➕ Add Episode
+- Admin Hierarchical Language & Regulation & Link Manager with persistent ➕ Add buttons
+- Admin URL Manager with full path traversal
 """
 
 import math
@@ -51,26 +52,18 @@ def channel_links_keyboard(
 
 
 # =========================================================================
-# USER KEYBOARDS
+# USER KEYBOARDS (STRICT USER FLOW)
 # =========================================================================
 
 def user_main_menu_keyboard() -> InlineKeyboardMarkup:
     """
     User home screen menu:
-    Row 1: [ 🎬 Titles ] [ 📂 Categories ]
-    Row 2: [ 🌐 Language ] [ ℹ️ Help ]
-    Row 3: [ 📩 Request ]
+    ONLY Categories, Help, Request.
     """
     keyboard = [
+        [InlineKeyboardButton(text="📂 Categories", callback_data="u_cats:1")],
         [
-            InlineKeyboardButton(text="🎬 Titles", callback_data="u_titles:1"),
-            InlineKeyboardButton(text="📂 Categories", callback_data="u_cats:1"),
-        ],
-        [
-            InlineKeyboardButton(text="🌐 Language", callback_data="u_langs:1"),
             InlineKeyboardButton(text="ℹ️ Help", callback_data="u_help"),
-        ],
-        [
             InlineKeyboardButton(text="📩 Request", callback_data="u_request"),
         ],
     ]
@@ -137,7 +130,7 @@ def category_titles_keyboard(
         t_name = str(t.get("title", "Untitled"))
         c_type = t.get("content_type", "normal")
         icon = "📺" if c_type == "series" else "🎬"
-        keyboard.append([InlineKeyboardButton(text=f"{icon} {t_name}", callback_data=f"ut:{t_id}")])
+        keyboard.append([InlineKeyboardButton(text=f"{icon} {t_name}", callback_data=f"ut:{t_id}:{category_id}")])
 
     # Pagination row
     nav_row: List[InlineKeyboardButton] = []
@@ -158,78 +151,6 @@ def category_titles_keyboard(
     return InlineKeyboardMarkup(keyboard)
 
 
-def titles_all_keyboard(
-    titles: List[Dict[str, Any]],
-    page: int = 1,
-    page_size: int = 8,
-) -> InlineKeyboardMarkup:
-    """Display all published titles with pagination."""
-    total_pages = max(1, math.ceil(len(titles) / page_size))
-    page = max(1, min(page, total_pages))
-    start_idx = (page - 1) * page_size
-    page_items = titles[start_idx : start_idx + page_size]
-
-    keyboard: List[List[InlineKeyboardButton]] = []
-
-    for t in page_items:
-        t_id = str(t.get("id", ""))
-        t_name = str(t.get("title", "Untitled"))
-        c_type = t.get("content_type", "normal")
-        icon = "📺" if c_type == "series" else "🎬"
-        keyboard.append([InlineKeyboardButton(text=f"{icon} {t_name}", callback_data=f"ut:{t_id}")])
-
-    nav_row: List[InlineKeyboardButton] = []
-    if page > 1:
-        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"u_titles:{page - 1}"))
-    if total_pages > 1:
-        nav_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
-    if page < total_pages:
-        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"u_titles:{page + 1}"))
-
-    if nav_row:
-        keyboard.append(nav_row)
-
-    keyboard.append([home_button()])
-    return InlineKeyboardMarkup(keyboard)
-
-
-def languages_browse_keyboard(
-    languages: List[Dict[str, Any]],
-    page: int = 1,
-    page_size: int = 8,
-) -> InlineKeyboardMarkup:
-    """Display languages for user discovery."""
-    total_pages = max(1, math.ceil(len(languages) / page_size))
-    page = max(1, min(page, total_pages))
-    start_idx = (page - 1) * page_size
-    page_items = languages[start_idx : start_idx + page_size]
-
-    keyboard: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
-    for l in page_items:
-        name = l.get("name", "Language")
-        row.append(InlineKeyboardButton(text=f"🗣️ {name}", callback_data=f"usrch_lang:{name}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-
-    nav_row: List[InlineKeyboardButton] = []
-    if page > 1:
-        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"u_langs:{page - 1}"))
-    if total_pages > 1:
-        nav_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
-    if page < total_pages:
-        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"u_langs:{page + 1}"))
-
-    if nav_row:
-        keyboard.append(nav_row)
-
-    keyboard.append([home_button()])
-    return InlineKeyboardMarkup(keyboard)
-
-
 def search_results_keyboard(results: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
     """Display search results as buttons."""
     keyboard: List[List[InlineKeyboardButton]] = []
@@ -239,7 +160,7 @@ def search_results_keyboard(results: List[Dict[str, Any]]) -> InlineKeyboardMark
         t_name = str(r.get("title", "Unknown"))
         c_type = r.get("content_type", "normal")
         icon = "📺" if c_type == "series" else "🎬"
-        keyboard.append([InlineKeyboardButton(text=f"{icon} {t_name}", callback_data=f"ut:{t_id}")])
+        keyboard.append([InlineKeyboardButton(text=f"{icon} {t_name}", callback_data=f"ut:{t_id}:")])
 
     keyboard.append([home_button()])
     return InlineKeyboardMarkup(keyboard)
@@ -248,7 +169,7 @@ def search_results_keyboard(results: List[Dict[str, Any]]) -> InlineKeyboardMark
 def seasons_selection_keyboard(
     title_id: str,
     seasons: List[Dict[str, Any]],
-    back_cb: str = "nav_home",
+    category_id: str = "",
 ) -> InlineKeyboardMarkup:
     """Display available seasons for a series title."""
     keyboard: List[List[InlineKeyboardButton]] = []
@@ -257,15 +178,16 @@ def seasons_selection_keyboard(
     for s in seasons:
         s_id = str(s.get("id", ""))
         s_name = str(s.get("season_name", f"Season {s.get('season_number', 1)}"))
-        row.append(InlineKeyboardButton(text=f"📚 {s_name}", callback_data=f"us_s:{title_id}:{s_id}"))
+        row.append(InlineKeyboardButton(text=f"📚 {s_name}", callback_data=f"us_s:{title_id}:{s_id}:{category_id}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
 
+    back_cb = f"ucat:{category_id}:1" if category_id else "u_cats:1"
     keyboard.append([
-        back_button(back_cb),
+        back_button(back_cb, label="⬅️ Back"),
         home_button(),
     ])
     return InlineKeyboardMarkup(keyboard)
@@ -275,7 +197,7 @@ def episodes_selection_keyboard(
     title_id: str,
     season_id: str,
     episodes: List[Dict[str, Any]],
-    back_cb: str,
+    category_id: str = "",
 ) -> InlineKeyboardMarkup:
     """Display available episodes in a season."""
     keyboard: List[List[InlineKeyboardButton]] = []
@@ -284,7 +206,7 @@ def episodes_selection_keyboard(
     for ep in episodes:
         ep_id = str(ep.get("id", ""))
         ep_name = str(ep.get("episode_title", f"Episode {ep.get('episode_number', 1)}"))
-        row.append(InlineKeyboardButton(text=f"🎬 {ep_name}", callback_data=f"us_ep:{title_id}:{season_id}:{ep_id}"))
+        row.append(InlineKeyboardButton(text=f"🎬 {ep_name}", callback_data=f"us_ep:{title_id}:{season_id}:{ep_id}:{category_id}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
@@ -292,18 +214,18 @@ def episodes_selection_keyboard(
         keyboard.append(row)
 
     keyboard.append([
-        back_button(back_cb),
+        back_button(f"ut:{title_id}:{category_id}", label="⬅️ Seasons"),
         home_button(),
     ])
     return InlineKeyboardMarkup(keyboard)
 
 
-def languages_selection_keyboard(
+def user_languages_keyboard(
     languages: List[str],
     title_id: str,
+    category_id: str = "",
     season_id: Optional[str] = None,
     episode_id: Optional[str] = None,
-    back_cb: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
     """Select available language for title or episode."""
     keyboard: List[List[InlineKeyboardButton]] = []
@@ -311,9 +233,9 @@ def languages_selection_keyboard(
     row: List[InlineKeyboardButton] = []
     for lang in languages:
         if season_id and episode_id:
-            cb = f"ul:{title_id}:{season_id}:{episode_id}:{lang}"
+            cb = f"u_l_ep:{title_id}:{season_id}:{episode_id}:{lang}:{category_id}"
         else:
-            cb = f"ul:{title_id}:{lang}"
+            cb = f"u_l_t:{title_id}:{lang}:{category_id}"
 
         row.append(InlineKeyboardButton(text=f"🗣️ {lang}", callback_data=cb))
         if len(row) == 2:
@@ -322,90 +244,92 @@ def languages_selection_keyboard(
     if row:
         keyboard.append(row)
 
-    default_back = f"us_s:{title_id}:{season_id}" if season_id else f"ut:{title_id}"
+    if season_id and episode_id:
+        back_cb = f"us_s:{title_id}:{season_id}:{category_id}"
+    elif category_id:
+        back_cb = f"ucat:{category_id}:1"
+    else:
+        back_cb = "u_cats:1"
+
     keyboard.append([
-        back_button(back_cb or default_back),
+        back_button(back_cb),
         home_button(),
     ])
     return InlineKeyboardMarkup(keyboard)
 
 
-def resolutions_selection_keyboard(
-    resolutions: List[str],
+def user_regulations_keyboard(
+    regulations: List[str],
     title_id: str,
     language: str,
+    category_id: str = "",
     season_id: Optional[str] = None,
     episode_id: Optional[str] = None,
-    back_cb: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
-    """Select available resolution quality."""
+    """Select available regulation under a selected language."""
     keyboard: List[List[InlineKeyboardButton]] = []
 
     row: List[InlineKeyboardButton] = []
-    for res in resolutions:
+    for reg in regulations:
         if season_id and episode_id:
-            cb = f"ur:{title_id}:{season_id}:{episode_id}:{language}:{res}"
+            cb = f"u_r_ep:{title_id}:{season_id}:{episode_id}:{language}:{reg}:{category_id}"
         else:
-            cb = f"ur:{title_id}:{language}:{res}"
+            cb = f"u_r_t:{title_id}:{language}:{reg}:{category_id}"
 
-        row.append(InlineKeyboardButton(text=f"📺 {res}", callback_data=cb))
+        row.append(InlineKeyboardButton(text=f"🎞️ {reg}", callback_data=cb))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
 
-    default_back = f"ul:{title_id}:{season_id}:{episode_id}" if (season_id and episode_id) else f"ut:{title_id}"
+    if season_id and episode_id:
+        back_cb = f"us_ep:{title_id}:{season_id}:{episode_id}:{category_id}"
+    else:
+        back_cb = f"ut:{title_id}:{category_id}"
+
     keyboard.append([
-        back_button(back_cb or default_back),
+        back_button(back_cb),
         home_button(),
     ])
     return InlineKeyboardMarkup(keyboard)
 
 
-def media_multi_urls_keyboard(
-    watch_urls: List[str],
-    download_urls: List[str],
-    watch_labels: Optional[List[str]] = None,
-    download_labels: Optional[List[str]] = None,
-    back_cb: Optional[str] = None,
+def user_media_links_keyboard(
+    links: List[Dict[str, Any]],
+    back_cb: str = "nav_home",
 ) -> InlineKeyboardMarkup:
     """
-    Generate multiple Watch and Download buttons with direct external url= parameter.
-    Each URL gets its own button without overwriting others.
+    Generate interactive URL buttons for each link in Language + Regulation.
+    Button text is the custom label (e.g. Download, Watch Online, Telegram, Server 2).
     """
     keyboard: List[List[InlineKeyboardButton]] = []
-    w_labels = watch_labels or []
-    dl_labels = download_labels or []
 
-    # Watch Buttons
-    for idx, w_url in enumerate(watch_urls):
-        if not w_url:
+    for item in links:
+        url = item.get("url", "").strip()
+        if not url:
             continue
-        custom_lbl = w_labels[idx] if idx < len(w_labels) and w_labels[idx] else ""
-        if len(watch_urls) == 1:
-            btn_text = f"▶️ Watch Online" if not custom_lbl else f"▶️ Watch - {custom_lbl}"
-        else:
-            btn_text = f"▶️ Watch - Server {idx + 1}" if not custom_lbl else f"▶️ Watch - {custom_lbl}"
-        keyboard.append([InlineKeyboardButton(text=btn_text, url=w_url)])
+        label = item.get("label", "Download").strip() or "Download"
 
-    # Download Buttons
-    for idx, dl_url in enumerate(download_urls):
-        if not dl_url:
-            continue
-        custom_lbl = dl_labels[idx] if idx < len(dl_labels) and dl_labels[idx] else ""
-        if len(download_urls) == 1:
-            btn_text = f"📥 Download Now" if not custom_lbl else f"📥 Download - {custom_lbl}"
-        else:
-            btn_text = f"📥 Download - Server {idx + 1}" if not custom_lbl else f"📥 Download - {custom_lbl}"
-        keyboard.append([InlineKeyboardButton(text=btn_text, url=dl_url)])
+        # Add appropriate icon based on label text
+        icon = "📥"
+        lbl_low = label.lower()
+        if "watch" in lbl_low or "stream" in lbl_low or "play" in lbl_low:
+            icon = "▶️"
+        elif "telegram" in lbl_low or "tg" in lbl_low:
+            icon = "📢"
+        elif "drive" in lbl_low or "mega" in lbl_low or "cloud" in lbl_low:
+            icon = "☁️"
+        elif "server" in lbl_low:
+            icon = "🌐"
 
-    # Navigation row
-    nav_row = [home_button()]
-    if back_cb:
-        nav_row.insert(0, back_button(back_cb))
-    keyboard.append(nav_row)
+        btn_text = f"{icon} {label}"
+        keyboard.append([InlineKeyboardButton(text=btn_text, url=url)])
 
+    keyboard.append([
+        back_button(back_cb, label="⬅️ Regulations"),
+        home_button(),
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -430,8 +354,8 @@ def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🏷️ Keywords", callback_data="adm_kws_cat"),
         ],
         [
-            InlineKeyboardButton(text="🌐 Languages", callback_data="adm_langs"),
-            InlineKeyboardButton(text="🎞️ Resolutions", callback_data="adm_resols"),
+            InlineKeyboardButton(text="🌐 Languages Preset", callback_data="adm_langs"),
+            InlineKeyboardButton(text="🎞️ Regulations Preset", callback_data="adm_resols"),
         ],
         [
             InlineKeyboardButton(text="👥 Users", callback_data="adm_users"),
@@ -453,7 +377,7 @@ def admin_categories_keyboard(
     page: int = 1,
     page_size: int = 6,
 ) -> InlineKeyboardMarkup:
-    """Admin categories management keyboard."""
+    """Admin categories management keyboard with ALWAYS VISIBLE Add Category button."""
     total_pages = max(1, math.ceil(len(categories) / page_size))
     page = max(1, min(page, total_pages))
     start_idx = (page - 1) * page_size
@@ -513,7 +437,7 @@ def admin_categories_picker_keyboard(
     prefix: str = "adm_t_cat_pick",
     back_cb: str = "adm_dash",
 ) -> InlineKeyboardMarkup:
-    """Picker to select a Category first before Titles or URL Manager."""
+    """Picker to select a Category first."""
     keyboard: List[List[InlineKeyboardButton]] = []
 
     for cat in categories:
@@ -532,7 +456,7 @@ def admin_titles_in_category_keyboard(
     page: int = 1,
     page_size: int = 6,
 ) -> InlineKeyboardMarkup:
-    """Manage Titles inside a specific category."""
+    """Manage Titles inside a category with ALWAYS VISIBLE ➕ Add Title."""
     total_pages = max(1, math.ceil(len(titles) / page_size))
     page = max(1, min(page, total_pages))
     start_idx = (page - 1) * page_size
@@ -576,7 +500,7 @@ def admin_title_detail_keyboard(
     is_published: bool,
     is_series: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Title configuration actions in Admin."""
+    """Title details actions."""
     toggle_text = "🔴 Unpublish" if is_published else "🟢 Publish"
     toggle_val = "0" if is_published else "1"
 
@@ -585,21 +509,19 @@ def admin_title_detail_keyboard(
     if is_series:
         keyboard.append([
             InlineKeyboardButton(text="📚 Manage Seasons", callback_data=f"adm_s_list:{title_id}:{category_id}"),
-            InlineKeyboardButton(text="🔗 Series URL Manager", callback_data=f"adm_u_s_m:{title_id}:{category_id}"),
         ])
     else:
         keyboard.append([
-            InlineKeyboardButton(text="🔗 Manage URLs", callback_data=f"adm_u_m:{title_id}:{category_id}"),
-            InlineKeyboardButton(text="🏷️ Keywords", callback_data=f"adm_kw_m:{title_id}:{category_id}"),
+            InlineKeyboardButton(text="🌐 Manage Languages", callback_data=f"adm_l_list:t:{title_id}:{category_id}"),
         ])
 
     keyboard.extend([
         [
+            InlineKeyboardButton(text="🏷️ Keywords", callback_data=f"adm_kw_m:{title_id}:{category_id}"),
             InlineKeyboardButton(
-                text="🔄 Switch to Series" if not is_series else "🔄 Switch to Movie/Normal",
+                text="🔄 Switch to Series" if not is_series else "🔄 Switch to Normal",
                 callback_data=f"adm_t_sw_type:{title_id}:{category_id}",
             ),
-            InlineKeyboardButton(text="📁 Assign Categories", callback_data=f"adm_t_cat_asg:{title_id}:{category_id}"),
         ],
         [
             InlineKeyboardButton(text=toggle_text, callback_data=f"adm_t_pub:{title_id}:{category_id}:{toggle_val}"),
@@ -613,14 +535,18 @@ def admin_title_detail_keyboard(
     return InlineKeyboardMarkup(keyboard)
 
 
+# =========================================================================
+# ADMIN SEASONS & EPISODES KEYBOARDS
+# =========================================================================
+
 def admin_seasons_keyboard(
     title_id: str,
     category_id: str,
     seasons: List[Dict[str, Any]],
 ) -> InlineKeyboardMarkup:
-    """Admin seasons management for a series."""
+    """Admin seasons management with ALWAYS VISIBLE ➕ Add Season."""
     keyboard: List[List[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="➕ New Season", callback_data=f"adm_s_add:{title_id}:{category_id}")]
+        [InlineKeyboardButton(text="➕ Add Season", callback_data=f"adm_s_add:{title_id}:{category_id}")]
     ]
 
     for s in seasons:
@@ -643,7 +569,7 @@ def admin_season_detail_keyboard(
     category_id: str,
     episodes: List[Dict[str, Any]],
 ) -> InlineKeyboardMarkup:
-    """Admin episodes management for a season."""
+    """Admin episodes management with ALWAYS VISIBLE ➕ Add Episode."""
     keyboard: List[List[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="➕ Add Episode", callback_data=f"adm_ep_add:{title_id}:{season_id}:{category_id}")],
         [InlineKeyboardButton(text="🗑️ Delete Season", callback_data=f"adm_s_del:{title_id}:{season_id}:{category_id}")],
@@ -672,12 +598,12 @@ def admin_episode_detail_keyboard(
     episode_id: str,
     category_id: str,
 ) -> InlineKeyboardMarkup:
-    """Admin single episode actions."""
+    """Admin single episode details."""
     keyboard = [
         [
             InlineKeyboardButton(
-                text="🔗 Manage URLs for Episode",
-                callback_data=f"adm_u_ep_m:{title_id}:{season_id}:{episode_id}:{category_id}",
+                text="🌐 Manage Languages",
+                callback_data=f"adm_l_list:e:{title_id}:{season_id}:{episode_id}:{category_id}",
             )
         ],
         [
@@ -694,38 +620,40 @@ def admin_episode_detail_keyboard(
     return InlineKeyboardMarkup(keyboard)
 
 
-def admin_url_combos_list_keyboard(
-    title_id: str,
-    combos: List[Dict[str, Any]],
-    category_id: str = "",
-    season_id: Optional[str] = None,
-    episode_id: Optional[str] = None,
+# =========================================================================
+# ADMIN HIERARCHICAL LANGUAGE & REGULATION & LINK KEYBOARDS
+# =========================================================================
+
+def admin_content_languages_keyboard(
+    target_type: str,  # 't' for title, 'e' for episode
+    target_info: Dict[str, str],  # dict containing title_id, optional season_id, episode_id, category_id
+    languages: List[str],
 ) -> InlineKeyboardMarkup:
-    """List configured URL combinations with button to add new."""
-    if season_id and episode_id:
-        add_cb = f"adm_u_add_ep:{title_id}:{season_id}:{episode_id}:{category_id}"
+    """
+    List configured languages for Title or Episode with ALWAYS VISIBLE ➕ Add Language.
+    """
+    title_id = target_info.get("title_id", "")
+    category_id = target_info.get("category_id", "")
+    season_id = target_info.get("season_id", "")
+    episode_id = target_info.get("episode_id", "")
+
+    if target_type == "e":
+        add_cb = f"adm_l_add:e:{title_id}:{season_id}:{episode_id}:{category_id}"
         back_cb = f"adm_ep_v:{title_id}:{season_id}:{episode_id}:{category_id}"
     else:
-        add_cb = f"adm_u_add:{title_id}:{category_id}"
+        add_cb = f"adm_l_add:t:{title_id}:{category_id}"
         back_cb = f"adm_t_v:{title_id}:{category_id}"
 
     keyboard: List[List[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="➕ Add URL Combination", callback_data=add_cb)]
+        [InlineKeyboardButton(text="➕ Add Language", callback_data=add_cb)]
     ]
 
-    for item in combos:
-        lang = item.get("language", "Lang")
-        res = item.get("resolution", "Res")
-        w_count = len(item.get("watch_urls", []))
-        dl_count = len(item.get("download_urls", []))
-
-        label = f"{lang} • {res} (▶️{w_count} 📥{dl_count})"
-        if season_id and episode_id:
-            cb = f"adm_u_combo_v:{title_id}:{season_id}:{episode_id}:{lang}:{res}:{category_id}"
+    for lang in languages:
+        if target_type == "e":
+            cb = f"adm_r_list:e:{title_id}:{season_id}:{episode_id}:{lang}:{category_id}"
         else:
-            cb = f"adm_u_combo_v:{title_id}:{lang}:{res}:{category_id}"
-
-        keyboard.append([InlineKeyboardButton(text=label, callback_data=cb)])
+            cb = f"adm_r_list:t:{title_id}:{lang}:{category_id}"
+        keyboard.append([InlineKeyboardButton(text=f"🗣️ {lang}", callback_data=cb)])
 
     keyboard.append([
         back_button(back_cb),
@@ -734,75 +662,104 @@ def admin_url_combos_list_keyboard(
     return InlineKeyboardMarkup(keyboard)
 
 
-def admin_url_combo_manage_keyboard(
-    title_id: str,
+def admin_content_regulations_keyboard(
+    target_type: str,
+    target_info: Dict[str, str],
     language: str,
-    resolution: str,
-    combo_data: Dict[str, Any],
-    category_id: str = "",
-    season_id: Optional[str] = None,
-    episode_id: Optional[str] = None,
+    regulations: List[str],
 ) -> InlineKeyboardMarkup:
     """
-    Manage individual URLs in a combination:
-    - Add Watch URL
-    - Add Download URL
-    - Delete specific URL links
-    - Delete entire combination
+    List configured regulations for selected Language with ALWAYS VISIBLE ➕ Add Regulation.
     """
-    keyboard: List[List[InlineKeyboardButton]] = []
-    watch_urls = list(combo_data.get("watch_urls", []))
-    download_urls = list(combo_data.get("download_urls", []))
+    title_id = target_info.get("title_id", "")
+    category_id = target_info.get("category_id", "")
+    season_id = target_info.get("season_id", "")
+    episode_id = target_info.get("episode_id", "")
 
-    # Add URL buttons
-    if season_id and episode_id:
-        add_w_cb = f"adm_u_aw:{title_id}:{season_id}:{episode_id}:{language}:{resolution}:{category_id}"
-        add_dl_cb = f"adm_u_adl:{title_id}:{season_id}:{episode_id}:{language}:{resolution}:{category_id}"
-        del_combo_cb = f"adm_u_cdel:{title_id}:{season_id}:{episode_id}:{language}:{resolution}:{category_id}"
-        back_cb = f"adm_u_ep_m:{title_id}:{season_id}:{episode_id}:{category_id}"
+    if target_type == "e":
+        add_cb = f"adm_r_add:e:{title_id}:{season_id}:{episode_id}:{language}:{category_id}"
+        del_lang_cb = f"adm_l_del:e:{title_id}:{season_id}:{episode_id}:{language}:{category_id}"
+        back_cb = f"adm_l_list:e:{title_id}:{season_id}:{episode_id}:{category_id}"
     else:
-        add_w_cb = f"adm_u_aw:{title_id}:{language}:{resolution}:{category_id}"
-        add_dl_cb = f"adm_u_adl:{title_id}:{language}:{resolution}:{category_id}"
-        del_combo_cb = f"adm_u_cdel:{title_id}:{language}:{resolution}:{category_id}"
-        back_cb = f"adm_u_m:{title_id}:{category_id}"
+        add_cb = f"adm_r_add:t:{title_id}:{language}:{category_id}"
+        del_lang_cb = f"adm_l_del:t:{title_id}:{language}:{category_id}"
+        back_cb = f"adm_l_list:t:{title_id}:{category_id}"
 
+    keyboard: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=f"➕ Add Regulation in {language}", callback_data=add_cb)],
+    ]
+
+    for reg in regulations:
+        if target_type == "e":
+            cb = f"adm_link_m:e:{title_id}:{season_id}:{episode_id}:{language}:{reg}:{category_id}"
+        else:
+            cb = f"adm_link_m:t:{title_id}:{language}:{reg}:{category_id}"
+        keyboard.append([InlineKeyboardButton(text=f"🎞️ {reg}", callback_data=cb)])
+
+    keyboard.append([InlineKeyboardButton(text=f"🗑️ Delete Language ({language})", callback_data=del_lang_cb)])
     keyboard.append([
-        InlineKeyboardButton(text="➕ Add Watch URL", callback_data=add_w_cb),
-        InlineKeyboardButton(text="➕ Add Download URL", callback_data=add_dl_cb),
+        back_button(back_cb),
+        InlineKeyboardButton(text="🎛️ Dashboard", callback_data="adm_dash"),
     ])
+    return InlineKeyboardMarkup(keyboard)
 
-    # Delete buttons for Watch URLs
-    for idx, w_url in enumerate(watch_urls):
-        preview = w_url[:24] + "..." if len(w_url) > 24 else w_url
-        if season_id and episode_id:
-            del_w_cb = f"adm_u_dw:{title_id}:{season_id}:{episode_id}:{language}:{resolution}:{idx}:{category_id}"
-        else:
-            del_w_cb = f"adm_u_dw:{title_id}:{language}:{resolution}:{idx}:{category_id}"
-        keyboard.append([
-            InlineKeyboardButton(text=f"🗑️ Del Watch {idx + 1}: {preview}", callback_data=del_w_cb)
-        ])
 
-    # Delete buttons for Download URLs
-    for idx, dl_url in enumerate(download_urls):
-        preview = dl_url[:24] + "..." if len(dl_url) > 24 else dl_url
-        if season_id and episode_id:
-            del_dl_cb = f"adm_u_ddl:{title_id}:{season_id}:{episode_id}:{language}:{resolution}:{idx}:{category_id}"
+def admin_content_links_keyboard(
+    target_type: str,
+    target_info: Dict[str, str],
+    language: str,
+    regulation: str,
+    links: List[Dict[str, Any]],
+) -> InlineKeyboardMarkup:
+    """
+    Manage URL Links / Buttons under Language + Regulation with ALWAYS VISIBLE ➕ Add Link / Button.
+    """
+    title_id = target_info.get("title_id", "")
+    category_id = target_info.get("category_id", "")
+    season_id = target_info.get("season_id", "")
+    episode_id = target_info.get("episode_id", "")
+
+    if target_type == "e":
+        add_cb = f"adm_lnk_add:e:{title_id}:{season_id}:{episode_id}:{language}:{regulation}:{category_id}"
+        del_reg_cb = f"adm_r_del:e:{title_id}:{season_id}:{episode_id}:{language}:{regulation}:{category_id}"
+        back_cb = f"adm_r_list:e:{title_id}:{season_id}:{episode_id}:{language}:{category_id}"
+    else:
+        add_cb = f"adm_lnk_add:t:{title_id}:{language}:{regulation}:{category_id}"
+        del_reg_cb = f"adm_r_del:t:{title_id}:{language}:{regulation}:{category_id}"
+        back_cb = f"adm_r_list:t:{title_id}:{language}:{category_id}"
+
+    keyboard: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="➕ Add Link / Button", callback_data=add_cb)]
+    ]
+
+    # Delete buttons for each link
+    for idx, item in enumerate(links):
+        link_id = item.get("id", str(idx))
+        label = item.get("label", "Download")
+        url = item.get("url", "")
+        preview = url[:20] + "..." if len(url) > 20 else url
+        if target_type == "e":
+            del_link_cb = f"adm_lnk_d:e:{title_id}:{season_id}:{episode_id}:{language}:{regulation}:{link_id}:{category_id}"
         else:
-            del_dl_cb = f"adm_u_ddl:{title_id}:{language}:{resolution}:{idx}:{category_id}"
+            del_link_cb = f"adm_lnk_d:t:{title_id}:{language}:{regulation}:{link_id}:{category_id}"
+
         keyboard.append([
-            InlineKeyboardButton(text=f"🗑️ Del Download {idx + 1}: {preview}", callback_data=del_dl_cb)
+            InlineKeyboardButton(text=f"🗑️ Del: {label} ({preview})", callback_data=del_link_cb)
         ])
 
     keyboard.append([
-        InlineKeyboardButton(text="🗑️ Delete Entire Combination", callback_data=del_combo_cb)
+        InlineKeyboardButton(text=f"🗑️ Delete Regulation ({regulation})", callback_data=del_reg_cb)
     ])
     keyboard.append([
         back_button(back_cb),
         InlineKeyboardButton(text="🎛️ Dashboard", callback_data="adm_dash"),
     ])
-
     return InlineKeyboardMarkup(keyboard)
 
+
+# =========================================================================
+# OTHER ADMIN KEYBOARDS
+# =========================================================================
 
 def admin_keywords_keyboard(
     title_id: str,
@@ -830,9 +787,9 @@ def admin_keywords_keyboard(
 
 
 def admin_languages_keyboard(languages: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
-    """Admin languages management keyboard."""
+    """Admin global languages management."""
     keyboard: List[List[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="➕ Add Language", callback_data="adm_lang_add")]
+        [InlineKeyboardButton(text="➕ Add Preset Language", callback_data="adm_lang_add")]
     ]
 
     for lang in languages:
@@ -848,14 +805,14 @@ def admin_languages_keyboard(languages: List[Dict[str, Any]]) -> InlineKeyboardM
 
 
 def admin_resolutions_keyboard(resolutions: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
-    """Admin resolutions management keyboard."""
+    """Admin global regulations/resolutions management."""
     keyboard: List[List[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="➕ Add Resolution", callback_data="adm_res_add")]
+        [InlineKeyboardButton(text="➕ Add Preset Regulation", callback_data="adm_res_add")]
     ]
 
     for res in resolutions:
         r_id = str(res.get("id", ""))
-        name = str(res.get("name", "Resolution"))
+        name = str(res.get("name", "Regulation"))
         status = "🟢" if res.get("is_enabled", True) else "🔴"
         keyboard.append([
             InlineKeyboardButton(text=f"{status} {name}", callback_data=f"adm_res_t:{r_id}")
@@ -878,19 +835,4 @@ def admin_users_keyboard(total_users: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(text="📢 Broadcast Announcement", callback_data="adm_broadcast")],
         [back_button("adm_dash")],
-    ])
-
-
-def confirmation_keyboard(
-    confirm_cb: str,
-    cancel_cb: str,
-    confirm_text: str = "✅ Yes, Confirm",
-    cancel_text: str = "❌ Cancel",
-) -> InlineKeyboardMarkup:
-    """Generic confirmation keyboard."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(text=confirm_text, callback_data=confirm_cb),
-            InlineKeyboardButton(text=cancel_text, callback_data=cancel_cb),
-        ]
     ])
