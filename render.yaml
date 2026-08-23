@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: telegram-anime-media-bot
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python -u main.py
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: PORT
+        value: 10000
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: MAIN_CHANNEL_ID
+        sync: false
+      - key: BACKUP_CHANNEL_ID
+        sync: false
+      - key: MAIN_CHANNEL_LINK
+        sync: false
+      - key: BACKUP_CHANNEL_LINK
+        sync: false
+      - key: FIREBASE_CREDENTIALS_B64
+        sync: false
