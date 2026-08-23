@@ -36,6 +36,8 @@ from config import (
     POSTER_CHANNEL_ID,
     QUALITY_CHANNELS,
     AVAILABLE_QUALITIES,
+    AVAILABLE_LANGUAGES,
+    validate_config,
 )
 
 from database import DatabaseManager
@@ -98,33 +100,6 @@ def run_health_server():
     except Exception:
         logger.exception(
             "Health server stopped."
-        )
-
-
-# =====================================================
-# CONFIG VALIDATION
-# =====================================================
-
-def validate_environment():
-    required = {
-        "BOT_TOKEN": BOT_TOKEN,
-        "ADMIN_ID": ADMIN_ID,
-        "MAIN_CHANNEL_ID": MAIN_CHANNEL_ID,
-        "BACKUP_CHANNEL_ID": BACKUP_CHANNEL_ID,
-        "MAIN_CHANNEL_LINK": MAIN_CHANNEL_LINK,
-        "BACKUP_CHANNEL_LINK": BACKUP_CHANNEL_LINK,
-    }
-
-    missing = [
-        name
-        for name, value in required.items()
-        if not value
-    ]
-
-    if missing:
-        raise RuntimeError(
-            "Missing environment variables: "
-            + ", ".join(missing)
         )
 
 
@@ -1563,6 +1538,312 @@ async def cancel_admin(
 
 
 # =====================================================
+# ADMIN ADD EPISODE CONVERSATION
+# =====================================================
+
+(
+    E_ANIME,
+    E_SEASON,
+    E_QUALITY,
+    E_LANGUAGE,
+    E_MAPPING,
+) = range(6, 11)
+
+
+async def admin_episode_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return ConversationHandler.END
+
+    await update.callback_query.answer()
+
+    context.user_data[
+        "admin_state"
+    ] = "add_episode"
+
+    await update.callback_query.message.reply_text(
+        "🎞 <b>Add Episode</b>\n\n"
+        "Send the Anime ID or the exact "
+        "Anime name.\n\n"
+        "(Anime ID was shown when the "
+        "Anime was added, or open it from "
+        "📂 Anime List.)\n\n"
+        "Send /cancel to stop anytime.",
+        parse_mode=ParseMode.HTML,
+    )
+
+    return E_ANIME
+
+
+async def admin_episode_anime(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    raw = update.message.text.strip()
+
+    anime = DatabaseManager.get_anime(raw)
+
+    if not anime:
+        anime, _ = DatabaseManager.search_anime(raw)
+
+    if not anime:
+
+        await update.message.reply_text(
+            "❌ Anime not found.\n\n"
+            "Send a valid Anime ID or name, "
+            "or /cancel to stop."
+        )
+
+        return E_ANIME
+
+    context.user_data["ep_anime_id"] = anime["id"]
+    context.user_data["ep_anime_name"] = anime["name"]
+    context.user_data["ep_season_count"] = (
+        anime.get("season_count", 1)
+    )
+
+    await update.message.reply_text(
+        f"🎬 <b>{anime['name']}</b>\n"
+        f"📚 Total Seasons: "
+        f"{anime.get('season_count', 1)}\n\n"
+        "Send the Season number:",
+        parse_mode=ParseMode.HTML,
+    )
+
+    return E_SEASON
+
+
+async def admin_episode_season(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    try:
+
+        season = int(
+            update.message.text.strip()
+        )
+
+        season_count = context.user_data[
+            "ep_season_count"
+        ]
+
+        if season < 1 or season > season_count:
+            raise ValueError
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ Enter a valid Season number "
+            "(1 to "
+            f"{context.user_data['ep_season_count']})."
+        )
+
+        return E_SEASON
+
+    context.user_data["ep_season"] = season
+
+    await update.message.reply_text(
+        "Send Quality.\n\n"
+        "Available: "
+        + ", ".join(AVAILABLE_QUALITIES)
+    )
+
+    return E_QUALITY
+
+
+async def admin_episode_quality(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    quality = update.message.text.strip()
+
+    if quality not in AVAILABLE_QUALITIES:
+
+        await update.message.reply_text(
+            "❌ Invalid Quality.\n\n"
+            "Choose one of: "
+            + ", ".join(AVAILABLE_QUALITIES)
+        )
+
+        return E_QUALITY
+
+    context.user_data["ep_quality"] = quality
+
+    await update.message.reply_text(
+        "Send Language.\n\n"
+        "Available: "
+        + ", ".join(AVAILABLE_LANGUAGES)
+    )
+
+    return E_LANGUAGE
+
+
+async def admin_episode_language(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    language = update.message.text.strip()
+
+    if language not in AVAILABLE_LANGUAGES:
+
+        await update.message.reply_text(
+            "❌ Invalid Language.\n\n"
+            "Choose one of: "
+            + ", ".join(AVAILABLE_LANGUAGES)
+        )
+
+        return E_LANGUAGE
+
+    quality = context.user_data["ep_quality"]
+
+    channel_id = QUALITY_CHANNELS.get(
+        (quality, language)
+    )
+
+    if not channel_id:
+
+        await update.message.reply_text(
+            "❌ No channel is configured for "
+            f"{quality} + {language}.\n\n"
+            "Check the CHANNEL_* environment "
+            "variables and try again.\n\n"
+            "Operation cancelled."
+        )
+
+        context.user_data.pop("admin_state", None)
+
+        return ConversationHandler.END
+
+    context.user_data["ep_language"] = language
+    context.user_data["ep_channel_id"] = channel_id
+
+    anime_name = context.user_data["ep_anime_name"]
+    season = context.user_data["ep_season"]
+
+    await update.message.reply_text(
+        f"🎬 <b>{anime_name}</b> — S{season} — "
+        f"{quality} — {language}\n\n"
+        "Now send episodes one by one in this "
+        "format:\n\n"
+        "<code>episode_number,message_id</code>\n\n"
+        "Example:\n"
+        "<code>1,4821</code>\n\n"
+        "The Message ID must be the ID of that "
+        "episode's message inside the source "
+        "channel for this Quality + Language.\n\n"
+        "Send /done when finished, or /cancel "
+        "to stop.",
+        parse_mode=ParseMode.HTML,
+    )
+
+    return E_MAPPING
+
+
+async def admin_episode_mapping(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    raw = update.message.text.strip()
+
+    parts = raw.split(",")
+
+    if len(parts) != 2:
+
+        await update.message.reply_text(
+            "❌ Send in format:\n"
+            "<code>episode_number,message_id</code>\n\n"
+            "Or /done to finish.",
+            parse_mode=ParseMode.HTML,
+        )
+
+        return E_MAPPING
+
+    try:
+
+        episode = int(parts[0].strip())
+        message_id = int(parts[1].strip())
+
+        if episode < 1 or message_id < 1:
+            raise ValueError
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ Both Episode number and Message "
+            "ID must be positive numbers.\n\n"
+            "Example:\n"
+            "<code>1,4821</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+        return E_MAPPING
+
+    DatabaseManager.save_episode_mapping(
+        anime_id=context.user_data["ep_anime_id"],
+        season=context.user_data["ep_season"],
+        episode=episode,
+        quality=context.user_data["ep_quality"],
+        language=context.user_data["ep_language"],
+        channel_id=context.user_data["ep_channel_id"],
+        message_id=message_id,
+    )
+
+    await update.message.reply_text(
+        f"✅ Episode {episode} saved.\n\n"
+        "Send the next "
+        "<code>episode_number,message_id</code>, "
+        "or /done to finish.",
+        parse_mode=ParseMode.HTML,
+    )
+
+    return E_MAPPING
+
+
+async def admin_episode_done(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    anime_name = context.user_data.get(
+        "ep_anime_name", ""
+    )
+
+    season = context.user_data.get("ep_season")
+    quality = context.user_data.get("ep_quality")
+    language = context.user_data.get("ep_language")
+
+    for key in list(context.user_data.keys()):
+        if key.startswith("ep_"):
+            context.user_data.pop(key, None)
+
+    context.user_data.pop("admin_state", None)
+
+    await update.message.reply_text(
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "     ✅ EPISODES SAVED\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"🎬 {anime_name}\n"
+        f"📚 Season {season}\n"
+        f"🎞 {quality} • 🌐 {language}\n\n"
+        "Use 🎞 Add Episode again to add more "
+        "Quality/Language combinations for "
+        "this Anime."
+    )
+
+    return ConversationHandler.END
+
+
+# =====================================================
 # CALLBACK ROUTER
 # =====================================================
 
@@ -1930,10 +2211,7 @@ async def callbacks(
             1,
         )[1]
 
-        if language not in [
-            "Hindi",
-            "English",
-        ]:
+        if language not in AVAILABLE_LANGUAGES:
             return
 
         context.user_data[
@@ -2050,7 +2328,7 @@ async def error_handler(
 
 def main():
 
-    validate_environment()
+    validate_config()
 
     DatabaseManager.init()
 
@@ -2140,6 +2418,76 @@ def main():
         per_chat=True,
     )
 
+    # ---------------------------------------------
+    # ADD EPISODE CONVERSATION
+    # ---------------------------------------------
+
+    add_episode_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                admin_episode_start,
+                pattern=r"^admin:episode$",
+            )
+        ],
+
+        states={
+
+            E_ANIME: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_episode_anime,
+                )
+            ],
+
+            E_SEASON: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_episode_season,
+                )
+            ],
+
+            E_QUALITY: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_episode_quality,
+                )
+            ],
+
+            E_LANGUAGE: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_episode_language,
+                )
+            ],
+
+            E_MAPPING: [
+                CommandHandler(
+                    "done",
+                    admin_episode_done,
+                ),
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    admin_episode_mapping,
+                ),
+            ],
+        },
+
+        fallbacks=[
+            CommandHandler(
+                "cancel",
+                cancel_admin,
+            )
+        ],
+
+        per_user=True,
+        per_chat=True,
+    )
+
     app.add_handler(
         CommandHandler(
             "start",
@@ -2156,6 +2504,10 @@ def main():
 
     app.add_handler(
         add_anime_conv
+    )
+
+    app.add_handler(
+        add_episode_conv
     )
 
     app.add_handler(
