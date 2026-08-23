@@ -1,29 +1,29 @@
+# FILE: admin.py
+# CHANGE: Category-first title addition, Series/Seasons/Episodes management, Multi-URL manager without overwriting, and User Requests view
+
 """
-Production-Ready Admin Control Panel Module for Telegram Bot.
+Production-Ready Admin Control Panel for Telegram Anime & Media Bot.
 
 Compatible with:
 - Python: 3.11+
 - python-telegram-bot: >=22.0, <23.0
-- Firebase Firestore via DatabaseManager
 
 Features:
-- Restricted access exclusively for ADMIN_ID
-- /admin entry point & interactive dashboard
-- Category Management (Add, Edit name, Reorder, Toggle enable/disable, Delete)
-- Title Management (Add, Edit, Category assignment, Delete, Toggle publish)
-- Keyword Management (Add, Remove)
-- Language Management (Add, Edit, Toggle enable/disable, Delete)
-- Resolution Management (Add, Edit, Toggle enable/disable, Delete)
-- URL Manager:
-    Category -> Title -> Language -> Resolution -> Manage independent Watch/Download URLs
-    Supports unlimited combinations without overwriting unrelated items.
-- User Metrics & Search Statistics Analytics
-- Broadcast messaging & Help text customization
-- Full ConversationHandler flows with URL/input validation and /cancel support.
+- Restricted strictly to ADMIN_ID with instant authorization check.
+- 1. Category-First Title System:
+     Admin -> Manage Titles -> Select Category -> Titles in Category -> Add/Edit Title.
+- 2. Series & Season & Episode System:
+     Title (Type: Series) -> Manage Seasons -> Add Season -> Add Episodes.
+- 3. Multi-URL Manager:
+     Title (Normal or Episode) -> Language -> Resolution -> Add unlimited Watch/Download URLs independently.
+- 4. Keyword System:
+     Add/Remove keywords directly linked to Firestore index.
+- 5. User Media Requests:
+     View latest user requests logged in Firestore.
+- 6. Categories, Languages, Resolutions, Broadcast & Statistics management.
 """
 
 import logging
-import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -43,23 +43,28 @@ from config import ADMIN_ID
 from database import DatabaseManager
 from keyboards import (
     admin_categories_keyboard,
+    admin_categories_picker_keyboard,
     admin_category_detail_keyboard,
     admin_dashboard_keyboard,
+    admin_episode_detail_keyboard,
+    admin_keywords_keyboard,
     admin_languages_keyboard,
-    admin_media_item_detail_keyboard,
     admin_resolutions_keyboard,
+    admin_season_detail_keyboard,
+    admin_seasons_keyboard,
     admin_stats_keyboard,
     admin_title_detail_keyboard,
-    admin_titles_keyboard,
-    admin_url_manager_keyboard,
+    admin_titles_in_category_keyboard,
+    admin_url_combo_manage_keyboard,
+    admin_url_combos_list_keyboard,
     admin_users_keyboard,
     back_button,
-    confirmation_keyboard,
+    cancel_action_keyboard,
 )
 
 logger = logging.getLogger("AdminHandlers")
 
-# Shared Database Manager instance
+# Database Manager
 db = DatabaseManager()
 
 # Conversation states
@@ -68,55 +73,54 @@ db = DatabaseManager()
     STATE_CAT_EDIT,
     STATE_CAT_ORDER,
     STATE_TITLE_ADD_NAME,
-    STATE_TITLE_ADD_DESC,
-    STATE_TITLE_ADD_YEAR,
-    STATE_TITLE_EDIT,
+    STATE_TITLE_ADD_TYPE,
+    STATE_SEASON_ADD_NUM,
+    STATE_SEASON_ADD_NAME,
+    STATE_EPISODE_ADD_NUM,
+    STATE_EPISODE_ADD_NAME,
     STATE_KW_ADD,
-    STATE_KW_DEL,
     STATE_LANG_ADD,
-    STATE_LANG_EDIT,
     STATE_RES_ADD,
-    STATE_RES_EDIT,
-    STATE_URL_WATCH_INPUT,
-    STATE_URL_DOWNLOAD_INPUT,
-    STATE_SETTINGS_HELP_EDIT,
-    STATE_BROADCAST_INPUT,
-) = range(17)
+    STATE_URL_ADD_WATCH,
+    STATE_URL_ADD_DOWNLOAD,
+    STATE_HELP_EDIT,
+    STATE_BROADCAST_MSG,
+) = range(16)
 
 
 # =========================================================================
-# HELPER & VALIDATION UTILITIES
+# HELPERS & VALIDATION
 # =========================================================================
 
 def is_admin(user_id: Optional[int]) -> bool:
-    """Ensure user is the configured system administrator."""
+    """Verify administrator identity."""
     return user_id is not None and user_id == ADMIN_ID
 
 
 def is_valid_url(url_str: str) -> bool:
-    """Validate HTTP/HTTPS URL format."""
+    """Verify HTTP / HTTPS URL syntax."""
     if not url_str:
         return False
     try:
-        res = urlparse(url_str.strip())
-        return all([res.scheme in ("http", "https"), res.netloc])
+        r = urlparse(url_str.strip())
+        return all([r.scheme in ("http", "https"), r.netloc])
     except Exception:
         return False
 
 
-def cancel_button_markup() -> InlineKeyboardMarkup:
-    """Standard inline cancel markup during active conversation states."""
+def cancel_markup() -> InlineKeyboardMarkup:
+    """Standard inline cancel markup for active conversation states."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(text="❌ Cancel Action", callback_data="adm_cancel_state")]
+        [InlineKeyboardButton(text="❌ Cancel Action", callback_data="adm_cancel")]
     ])
 
 
 # =========================================================================
-# ADMIN AUTH & DASHBOARD
+# DASHBOARD ENTRY & CANCEL
 # =========================================================================
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Entry point for /admin command."""
+    """Entry point for /admin dashboard."""
     user = update.effective_user
     if not user or not is_admin(user.id):
         if update.message:
@@ -125,24 +129,21 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     text = (
         "🎛️ *Administrator Control Panel*\n\n"
-        "Select a management module to configure bot content, metadata, media links, or review analytics:"
+        "Manage categories, titles, series/episodes, media links, and user analytics:"
     )
     markup = admin_dashboard_keyboard()
 
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
-        )
+        await update.callback_query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
     elif update.message:
-        await update.message.reply_text(
-            text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
     return ConversationHandler.END
 
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles /cancel command to abort any ongoing admin input prompt."""
+async def cancel_admin_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Abort conversation and return to admin dashboard."""
     context.user_data.clear()
     msg = "🚫 *Action cancelled.* Returned to Admin Dashboard."
     if update.callback_query:
@@ -158,35 +159,30 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # =========================================================================
-# CATEGORIES MANAGEMENT
+# 1. CATEGORIES MANAGEMENT
 # =========================================================================
 
 async def admin_categories_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display paginated list of categories in Admin."""
+    """List categories in Admin."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
     await query.answer()
 
     data = query.data or "adm_cats:1"
-    page = 1
-    if ":" in data:
-        try:
-            page = int(data.split(":")[1])
-        except ValueError:
-            page = 1
+    page = int(data.split(":")[1]) if ":" in data else 1
 
     cats = db.get_all_categories(only_enabled=False)
     markup = admin_categories_keyboard(cats, page=page, page_size=6)
     await query.edit_message_text(
-        "📂 *Category Management*\n\nSelect a category to modify or add a new one:",
+        "📂 *Category Management*\n\nSelect a category to edit or create a new one:",
         reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def admin_cat_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View and manage single category details."""
+    """View individual category."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
@@ -210,7 +206,7 @@ async def admin_cat_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def admin_cat_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle enable/disable status for category."""
+    """Toggle enable/disable status."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
@@ -219,7 +215,7 @@ async def admin_cat_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     cat_id = parts[1]
     new_state = parts[2] == "1"
     db.set_category_enabled(cat_id, new_state)
-    await query.answer(f"Category status changed to {'Enabled' if new_state else 'Disabled'}.")
+    await query.answer(f"Category status set to {'Enabled' if new_state else 'Disabled'}.")
     await admin_cat_view(update, context)
 
 
@@ -231,18 +227,17 @@ async def admin_cat_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     cat_id = query.data.split(":")[1]
     db.delete_category(cat_id)
-    await query.answer("Category deleted successfully.")
+    await query.answer("Category deleted.")
     query.data = "adm_cats:1"
     await admin_categories_list(update, context)
 
 
-# Category Add/Edit Flow Handlers
 async def start_cat_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(
-        "➕ *Add New Category*\n\nPlease enter the name of the new category:",
-        reply_markup=cancel_button_markup(),
+        "➕ *Add New Category*\n\nEnter the name of the new category:",
+        reply_markup=cancel_markup(),
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_CAT_ADD
@@ -251,7 +246,6 @@ async def start_cat_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 async def handle_cat_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     name = (update.message.text or "").strip()
     if not name:
-        await update.message.reply_text("⚠️ Invalid name. Please enter a valid text:")
         return STATE_CAT_ADD
 
     cat_id = db.add_category(name=name)
@@ -269,8 +263,8 @@ async def start_cat_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     cat_id = query.data.split(":")[1]
     context.user_data["edit_cat_id"] = cat_id
     await query.edit_message_text(
-        "✏️ *Edit Category Name*\n\nEnter the new name for this category:",
-        reply_markup=cancel_button_markup(),
+        "✏️ *Edit Category Name*\n\nEnter the new name:",
+        reply_markup=cancel_markup(),
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_CAT_EDIT
@@ -280,8 +274,7 @@ async def handle_cat_edit_input(update: Update, context: ContextTypes.DEFAULT_TY
     name = (update.message.text or "").strip()
     cat_id = context.user_data.get("edit_cat_id")
     if not name or not cat_id:
-        await update.message.reply_text("⚠️ Invalid name. Please try again:")
-        return STATE_CAT_EDIT
+        return ConversationHandler.END
 
     db.edit_category(cat_id, name=name)
     await update.message.reply_text(
@@ -298,8 +291,8 @@ async def start_cat_order(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     cat_id = query.data.split(":")[1]
     context.user_data["order_cat_id"] = cat_id
     await query.edit_message_text(
-        "🔢 *Reorder Category*\n\nEnter the new integer display order (e.g. 1, 2, 10):",
-        reply_markup=cancel_button_markup(),
+        "🔢 *Reorder Category*\n\nEnter integer display order (e.g. 1, 2, 5):",
+        reply_markup=cancel_markup(),
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_CAT_ORDER
@@ -309,187 +302,148 @@ async def handle_cat_order_input(update: Update, context: ContextTypes.DEFAULT_T
     text = (update.message.text or "").strip()
     cat_id = context.user_data.get("order_cat_id")
     try:
-        order_val = int(text)
-    except ValueError:
-        await update.message.reply_text("⚠️ Please enter a valid number (e.g. 1, 5):")
-        return STATE_CAT_ORDER
-
-    db.edit_category(cat_id, order=order_val)
-    await update.message.reply_text(
-        f"✅ Category display order updated to `{order_val}`.",
-        reply_markup=admin_dashboard_keyboard(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
+        val = int(text)
+        db.edit_category(cat_id, order=val)
+        await update.message.reply_text(
+            f"✅ Display order updated to `{val}`.",
+            reply_markup=admin_dashboard_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        await update.message.reply_text("⚠️ Invalid number. Order not updated.")
     return ConversationHandler.END
 
 
 # =========================================================================
-# TITLES MANAGEMENT
+# 2. CATEGORY-FIRST TITLE SYSTEM
 # =========================================================================
 
-async def admin_titles_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display paginated titles in Admin."""
+async def admin_titles_category_picker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Step 1: Admin selects Category to view/add titles inside it."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
     await query.answer()
 
-    data = query.data or "adm_titles:1"
-    page = 1
-    if ":" in data:
-        try:
-            page = int(data.split(":")[1])
-        except ValueError:
-            page = 1
-
-    titles_stream = db.titles_col.order_by("updated_at", direction=db.titles_col._client.Query.DESCENDING).stream()
-    all_titles = []
-    for doc in titles_stream:
-        d = doc.to_dict()
-        d["id"] = doc.id
-        all_titles.append(d)
-
-    markup = admin_titles_keyboard(all_titles, page=page, page_size=6)
+    cats = db.get_all_categories(only_enabled=False)
+    markup = admin_categories_picker_keyboard(cats, prefix="adm_t_cat_pick", back_cb="adm_dash")
     await query.edit_message_text(
-        "🎬 *Title Management*\n\nSelect a title to manage details, categories, keywords, or media URLs:",
+        "🎬 *Manage Titles (Step 1: Select Category)*\n\nChoose a category to view or add titles:",
         reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
-async def admin_title_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View single title control overview."""
+async def admin_titles_in_category_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Step 2: View titles belonging to the selected category."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
     await query.answer()
 
-    title_id = query.data.split(":")[1]
-    title = db.get_title(title_id)
-    if not title:
-        await query.edit_message_text("⚠️ Title not found.", reply_markup=admin_dashboard_keyboard())
-        return
-
-    status = "🟢 Published" if title.get("is_published", True) else "🔴 Draft / Unpublished"
-    kws = ", ".join(title.get("keywords", [])) or "None"
-    cats = title.get("category_ids", [])
-    cat_names = []
-    for c_id in cats:
-        c_doc = db.get_category(c_id)
-        if c_doc:
-            cat_names.append(c_doc.get("name", c_id))
-    cat_str = ", ".join(cat_names) or "Unassigned"
-
-    media_items = db.get_media_urls_for_title(title_id)
-    text = (
-        f"🎬 *Title:* `{title.get('title')}`\n"
-        f"• Status: {status}\n"
-        f"• Release Year: `{title.get('release_year') or 'N/A'}`\n"
-        f"• Categories: {cat_str}\n"
-        f"• Keywords: _{kws}_\n"
-        f"• Configured URL Combos: `{len(media_items)}`\n"
-        f"• Description: {title.get('description') or 'None'}"
-    )
-    markup = admin_title_detail_keyboard(title_id, bool(title.get("is_published", True)))
-    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
-
-
-async def admin_title_toggle_pub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle title published status."""
-    query = update.callback_query
-    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-
+    # Format: adm_t_cat_pick:<category_id> or adm_t_cat_pick:<category_id>:<page>
     parts = query.data.split(":")
-    title_id = parts[1]
-    new_state = parts[2] == "1"
-    db.edit_title(title_id, is_published=new_state)
-    await query.answer(f"Title set to {'Published' if new_state else 'Draft'}.")
-    await admin_title_view(update, context)
+    cat_id = parts[1]
+    page = int(parts[2]) if len(parts) >= 3 else 1
+
+    cat_doc = db.get_category(cat_id)
+    cat_name = cat_doc.get("name", "Category") if cat_doc else "Category"
+
+    titles = db.get_titles_by_category(cat_id, only_published=False, limit=100)
+    markup = admin_titles_in_category_keyboard(
+        category_id=cat_id,
+        category_name=cat_name,
+        titles=titles,
+        page=page,
+        page_size=6,
+    )
+    await query.edit_message_text(
+        f"🎬 *Titles in:* `{cat_name}`\n\nSelect a title to manage or tap **➕ Add Title**:",
+        reply_markup=markup,
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
-async def admin_title_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete title and all associated media URLs."""
+async def start_title_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Step 3: Ask for title name inside selected category."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-
-    title_id = query.data.split(":")[1]
-    db.delete_title(title_id)
-    await query.answer("Title and all media combinations deleted.")
-    query.data = "adm_titles:1"
-    await admin_titles_list(update, context)
-
-
-# Title Add Flow Handlers
-async def start_title_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
+        return ConversationHandler.END
     await query.answer()
+
+    cat_id = query.data.split(":")[1]
+    context.user_data["new_title_cat_id"] = cat_id
+
+    cat_doc = db.get_category(cat_id)
+    cat_name = cat_doc.get("name", "Category") if cat_doc else "Category"
+
     await query.edit_message_text(
-        "➕ *Add New Title (Step 1/3)*\n\nEnter the title name (e.g., *Naruto Shippuden*):",
-        reply_markup=cancel_button_markup(),
+        f"➕ *Add Title to:* `{cat_name}`\n\nEnter the title name (e.g. *Solo Leveling*, *Oppenheimer*):",
+        reply_markup=cancel_markup(),
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_TITLE_ADD_NAME
 
 
-async def handle_title_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def handle_title_add_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receive title name, then ask for Content Type (Normal vs Series)."""
     name = (update.message.text or "").strip()
     if not name:
         await update.message.reply_text("⚠️ Title name cannot be empty:")
         return STATE_TITLE_ADD_NAME
 
     context.user_data["new_title_name"] = name
+    cat_id = context.user_data.get("new_title_cat_id", "")
+
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(text="🎬 Normal (Movie / Standalone)", callback_data="set_type_normal"),
+            InlineKeyboardButton(text="📺 Series (Seasons & Episodes)", callback_data="set_type_series"),
+        ],
+        [InlineKeyboardButton(text="❌ Cancel", callback_data="adm_cancel")],
+    ])
+
     await update.message.reply_text(
-        f"🎬 Title: *{name}*\n\n*(Step 2/3)* Enter a short description / synopsis (or send `-` to skip):",
-        reply_markup=cancel_button_markup(),
+        f"🎬 Title Name: *{name}*\n\nSelect the content structure:",
+        reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN,
     )
-    return STATE_TITLE_ADD_DESC
+    return STATE_TITLE_ADD_TYPE
 
 
-async def handle_title_add_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    desc = (update.message.text or "").strip()
-    context.user_data["new_title_desc"] = "" if desc == "-" else desc
-    await update.message.reply_text(
-        "*(Step 3/3)* Enter release year (e.g. `2024` or send `-` to skip):",
-        reply_markup=cancel_button_markup(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    return STATE_TITLE_ADD_YEAR
+async def handle_title_add_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Save title in selected category with specified content type."""
+    query = update.callback_query
+    if not query:
+        return ConversationHandler.END
+    await query.answer()
 
-
-async def handle_title_add_year(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    year_str = (update.message.text or "").strip()
-    year = None
-    if year_str != "-":
-        try:
-            year = int(year_str)
-        except ValueError:
-            pass
-
-    title_name = context.user_data.get("new_title_name", "Untitled")
-    desc = context.user_data.get("new_title_desc", "")
+    c_type = "series" if query.data == "set_type_series" else "normal"
+    name = context.user_data.get("new_title_name", "Untitled")
+    cat_id = context.user_data.get("new_title_cat_id", "")
 
     title_id = db.add_title(
-        title=title_name,
-        description=desc,
-        release_year=year,
+        title=name,
+        category_ids=[cat_id] if cat_id else [],
+        content_type=c_type,
         is_published=True,
     )
 
-    await update.message.reply_text(
-        f"✅ Title *{title_name}* created successfully (ID: `{title_id}`).\n\n"
-        "You can now attach Category tags or configure URL combinations from URL Manager.",
+    type_lbl = "Series (Seasons & Episodes)" if c_type == "series" else "Movie / Standalone"
+    await query.edit_message_text(
+        f"✅ *Title Created Successfully!*\n\n"
+        f"• Title: *{name}*\n"
+        f"• Type: `{type_lbl}`\n"
+        f"• ID: `{title_id}`\n\n"
+        "You can now manage seasons/episodes or configure URLs.",
         reply_markup=admin_dashboard_keyboard(),
         parse_mode=ParseMode.MARKDOWN,
     )
     return ConversationHandler.END
 
 
-# Category Assignment to Title
-async def admin_title_assign_cats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Interactive category checkbox selector for a title."""
+async def admin_title_detail_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View details and options of a single title."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
@@ -497,96 +451,746 @@ async def admin_title_assign_cats(update: Update, context: ContextTypes.DEFAULT_
 
     parts = query.data.split(":")
     title_id = parts[1]
-    
-    if len(parts) >= 3:
-        cat_to_toggle = parts[2]
-        title_doc = db.get_title(title_id)
-        current_cats = set(title_doc.get("category_ids", []) if title_doc else [])
-        if cat_to_toggle in current_cats:
-            current_cats.remove(cat_to_toggle)
-        else:
-            current_cats.add(cat_to_toggle)
-        db.assign_categories_to_title(title_id, list(current_cats))
+    cat_id = parts[2] if len(parts) >= 3 else ""
 
     title_doc = db.get_title(title_id)
-    assigned_cats = set(title_doc.get("category_ids", []) if title_doc else [])
+    if not title_doc:
+        await query.edit_message_text("⚠️ Title not found.", reply_markup=admin_dashboard_keyboard())
+        return
 
-    all_cats = db.get_all_categories()
-    keyboard = []
-    for cat in all_cats:
-        c_id = cat.get("id", "")
-        c_name = cat.get("name", "Category")
-        checked = "✅" if c_id in assigned_cats else "⬜"
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"{checked} {c_name}",
-                callback_data=f"adm_t_cat:{title_id}:{c_id}",
-            )
-        ])
+    c_type = title_doc.get("content_type", "normal")
+    is_series = c_type == "series"
+    status = "🟢 Published" if title_doc.get("is_published", True) else "🔴 Draft"
+    kws = ", ".join(title_doc.get("keywords", [])) or "None"
 
-    keyboard.append([
-        back_button(f"adm_t_v:{title_id}", label="⬅️ Done / Back to Title")
-    ])
-
-    await query.edit_message_text(
-        f"📁 *Assign Categories to:* `{title_doc.get('title') if title_doc else 'Title'}`\n\n"
-        "Tap categories to toggle inclusion:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN,
+    text = (
+        f"{'📺' if is_series else '🎬'} *Title:* `{title_doc.get('title')}`\n"
+        f"• Type: `{'Series' if is_series else 'Movie/Normal'}`\n"
+        f"• Status: {status}\n"
+        f"• Keywords: _{kws}_\n"
+        f"• ID: `{title_id}`"
     )
+    markup = admin_title_detail_keyboard(
+        title_id=title_id,
+        category_id=cat_id,
+        is_published=bool(title_doc.get("is_published", True)),
+        is_series=is_series,
+    )
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
 
 
-# Keywords Add/Remove Flow
-async def admin_title_keywords_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Keywords manager for title."""
+async def admin_title_toggle_pub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle title published/draft."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    cat_id = parts[2]
+    new_state = parts[3] == "1"
+
+    db.edit_title(title_id, is_published=new_state)
+    await query.answer(f"Title set to {'Published' if new_state else 'Draft'}.")
+    query.data = f"adm_t_v:{title_id}:{cat_id}"
+    await admin_title_detail_view(update, context)
+
+
+async def admin_title_switch_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Switch content type between normal and series."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    cat_id = parts[2]
+
+    title_doc = db.get_title(title_id)
+    curr_type = title_doc.get("content_type", "normal") if title_doc else "normal"
+    new_type = "series" if curr_type == "normal" else "normal"
+
+    db.edit_title(title_id, content_type=new_type)
+    await query.answer(f"Switched type to {new_type.upper()}.")
+    query.data = f"adm_t_v:{title_id}:{cat_id}"
+    await admin_title_detail_view(update, context)
+
+
+async def admin_title_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete title."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    cat_id = parts[2]
+
+    db.delete_title(title_id)
+    await query.answer("Title deleted.")
+    query.data = f"adm_t_cat_pick:{cat_id}"
+    await admin_titles_in_category_view(update, context)
+
+
+# =========================================================================
+# 3. SERIES MANAGEMENT (SEASONS & EPISODES)
+# =========================================================================
+
+async def admin_seasons_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List seasons of a series."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
     await query.answer()
 
-    title_id = query.data.split(":")[1]
+    parts = query.data.split(":")
+    title_id = parts[1]
+    cat_id = parts[2]
+
+    title_doc = db.get_title(title_id)
+    t_name = title_doc.get("title", "Series") if title_doc else "Series"
+
+    seasons = db.get_seasons(title_id)
+    markup = admin_seasons_keyboard(title_id=title_id, category_id=cat_id, seasons=seasons)
+    await query.edit_message_text(
+        f"📺 *Manage Seasons for:* `{t_name}`\n\nSelect a season or tap **➕ New Season**:",
+        reply_markup=markup,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def start_season_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for Season Number."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+    await query.answer()
+
+    parts = query.data.split(":")
+    context.user_data["s_add_title_id"] = parts[1]
+    context.user_data["s_add_cat_id"] = parts[2]
+
+    await query.edit_message_text(
+        "📚 *Add Season (Step 1/2)*\n\nEnter the season number (e.g. `1`, `2`, `3`):",
+        reply_markup=cancel_markup(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return STATE_SEASON_ADD_NUM
+
+
+async def handle_season_add_num(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    try:
+        num = int(text)
+        context.user_data["s_add_num"] = num
+    except ValueError:
+        await update.message.reply_text("⚠️ Please enter a valid number (e.g. 1, 2):")
+        return STATE_SEASON_ADD_NUM
+
+    await update.message.reply_text(
+        f"📚 Season Number: `{num}`\n\n*(Step 2/2)* Enter season display name (e.g. `Season 1`, or send `-` for default):",
+        reply_markup=cancel_markup(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return STATE_SEASON_ADD_NAME
+
+
+async def handle_season_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    s_name = "" if text == "-" else text
+
+    title_id = context.user_data.get("s_add_title_id")
+    cat_id = context.user_data.get("s_add_cat_id")
+    num = context.user_data.get("s_add_num", 1)
+
+    if not title_id:
+        return ConversationHandler.END
+
+    season_id = db.add_season(title_id=title_id, season_number=num, season_name=s_name)
+    await update.message.reply_text(
+        f"✅ Season `{s_name or f'Season {num}'}` added successfully (ID: `{season_id}`).",
+        reply_markup=admin_dashboard_keyboard(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
+
+
+async def admin_season_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View episodes in a season."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    season_id = parts[2]
+    cat_id = parts[3]
+
+    season_doc = db.get_season(title_id, season_id)
+    s_name = season_doc.get("season_name", "Season") if season_doc else "Season"
+
+    episodes = db.get_episodes(title_id, season_id)
+    markup = admin_season_detail_keyboard(
+        title_id=title_id,
+        season_id=season_id,
+        category_id=cat_id,
+        episodes=episodes,
+    )
+    await query.edit_message_text(
+        f"📚 *Manage Episodes for:* `{s_name}`\n\nConfigured episodes ({len(episodes)}):\nSelect an episode to manage URLs:",
+        reply_markup=markup,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def admin_season_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete a season."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    season_id = parts[2]
+    cat_id = parts[3]
+
+    db.delete_season(title_id, season_id)
+    await query.answer("Season deleted.")
+    query.data = f"adm_s_list:{title_id}:{cat_id}"
+    await admin_seasons_list(update, context)
+
+
+async def start_episode_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for episode number."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+    await query.answer()
+
+    parts = query.data.split(":")
+    context.user_data["ep_add_title_id"] = parts[1]
+    context.user_data["ep_add_season_id"] = parts[2]
+    context.user_data["ep_add_cat_id"] = parts[3]
+
+    await query.edit_message_text(
+        "🎬 *Add Episode (Step 1/2)*\n\nEnter episode number (e.g. `1`, `2`, `24`):",
+        reply_markup=cancel_markup(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return STATE_EPISODE_ADD_NUM
+
+
+async def handle_episode_add_num(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    try:
+        num = int(text)
+        context.user_data["ep_add_num"] = num
+    except ValueError:
+        await update.message.reply_text("⚠️ Please enter a valid number (e.g. 1, 5):")
+        return STATE_EPISODE_ADD_NUM
+
+    await update.message.reply_text(
+        f"🎬 Episode Number: `{num}`\n\n*(Step 2/2)* Enter episode title (e.g. `Episode 1`, or send `-` for default):",
+        reply_markup=cancel_markup(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return STATE_EPISODE_ADD_NAME
+
+
+async def handle_episode_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    ep_name = "" if text == "-" else text
+
+    title_id = context.user_data.get("ep_add_title_id")
+    season_id = context.user_data.get("ep_add_season_id")
+    num = context.user_data.get("ep_add_num", 1)
+
+    if not title_id or not season_id:
+        return ConversationHandler.END
+
+    ep_id = db.add_episode(
+        title_id=title_id,
+        season_id=season_id,
+        episode_number=num,
+        episode_title=ep_name,
+    )
+    await update.message.reply_text(
+        f"✅ Episode `{ep_name or f'Episode {num}'}` added successfully (ID: `{ep_id}`).",
+        reply_markup=admin_dashboard_keyboard(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
+
+
+async def admin_episode_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View individual episode."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    season_id = parts[2]
+    episode_id = parts[3]
+    cat_id = parts[4]
+
+    ep_doc = db.get_episode(title_id, season_id, episode_id)
+    ep_name = ep_doc.get("episode_title", "Episode") if ep_doc else "Episode"
+
+    markup = admin_episode_detail_keyboard(
+        title_id=title_id,
+        season_id=season_id,
+        episode_id=episode_id,
+        category_id=cat_id,
+    )
+    await query.edit_message_text(
+        f"🎬 *Episode:* `{ep_name}`\n\nManage links or options:",
+        reply_markup=markup,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def admin_episode_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete an episode."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    season_id = parts[2]
+    episode_id = parts[3]
+    cat_id = parts[4]
+
+    db.delete_episode(title_id, season_id, episode_id)
+    await query.answer("Episode deleted.")
+    query.data = f"adm_s_v:{title_id}:{season_id}:{cat_id}"
+    await admin_season_view(update, context)
+
+
+# =========================================================================
+# 4. MULTI-URL MANAGER
+# =========================================================================
+
+async def admin_url_combos_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View combinations for Normal Title or Episode."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    if parts[0] == "adm_u_m":
+        # Normal Title: adm_u_m:<title_id>:<category_id>
+        title_id = parts[1]
+        cat_id = parts[2] if len(parts) >= 3 else ""
+        combos = db.get_all_media_combos_for_title(title_id)
+        markup = admin_url_combos_list_keyboard(title_id, combos, category_id=cat_id)
+    else:
+        # Episode: adm_u_ep_m:<title_id>:<season_id>:<episode_id>:<category_id>
+        title_id = parts[1]
+        season_id = parts[2]
+        episode_id = parts[3]
+        cat_id = parts[4] if len(parts) >= 5 else ""
+        combos = db.get_all_media_combos_for_title(title_id, season_id=season_id, episode_id=episode_id)
+        markup = admin_url_combos_list_keyboard(
+            title_id, combos, category_id=cat_id, season_id=season_id, episode_id=episode_id
+        )
+
+    await query.edit_message_text(
+        "🔗 *URL Combination Manager*\n\nSelect a combination to manage URLs or tap **➕ Add URL Combination**:",
+        reply_markup=markup,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def admin_url_combo_detail_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View & manage specific Language + Resolution combination."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    if len(parts) == 5:
+        # Normal: adm_u_combo_v:<title_id>:<lang>:<res>:<category_id>
+        title_id = parts[1]
+        lang = parts[2]
+        res = parts[3]
+        cat_id = parts[4]
+        season_id, episode_id = None, None
+        combo_data = db.get_media_url_combo(title_id, language=lang, resolution=res) or {}
+    else:
+        # Episode: adm_u_combo_v:<title_id>:<season_id>:<episode_id>:<lang>:<res>:<category_id>
+        title_id = parts[1]
+        season_id = parts[2]
+        episode_id = parts[3]
+        lang = parts[4]
+        res = parts[5]
+        cat_id = parts[6]
+        combo_data = (
+            db.get_media_url_combo(title_id, language=lang, resolution=res, season_id=season_id, episode_id=episode_id)
+            or {}
+        )
+
+    w_urls = combo_data.get("watch_urls", [])
+    dl_urls = combo_data.get("download_urls", [])
+
+    text = (
+        f"🔗 *Combination Details*\n"
+        f"• Language: `{lang}`\n"
+        f"• Quality: `{res}`\n\n"
+        f"▶️ *Watch URLs ({len(w_urls)}):*\n"
+        + ("\n".join(f"  {i+1}. {u}" for i, u in enumerate(w_urls)) if w_urls else "  None")
+        + f"\n\n📥 *Download URLs ({len(dl_urls)}):*\n"
+        + ("\n".join(f"  {i+1}. {u}" for i, u in enumerate(dl_urls)) if dl_urls else "  None")
+    )
+    markup = admin_url_combo_manage_keyboard(
+        title_id=title_id,
+        language=lang,
+        resolution=res,
+        combo_data=combo_data,
+        category_id=cat_id,
+        season_id=season_id,
+        episode_id=episode_id,
+    )
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+
+async def start_add_url_combo_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Step 1: Pick Language for new combo."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    is_ep = parts[0] == "adm_u_add_ep"
+    title_id = parts[1]
+
+    langs = db.get_available_languages(only_enabled=True)
+    keyboard = []
+    for l in langs:
+        l_name = l.get("name", "Lang")
+        if is_ep:
+            season_id = parts[2]
+            episode_id = parts[3]
+            cat_id = parts[4]
+            cb = f"adm_u_setlang_ep:{title_id}:{season_id}:{episode_id}:{l_name}:{cat_id}"
+        else:
+            cat_id = parts[2] if len(parts) >= 3 else ""
+            cb = f"adm_u_setlang:{title_id}:{l_name}:{cat_id}"
+
+        keyboard.append([InlineKeyboardButton(text=f"🗣️ {l_name}", callback_data=cb)])
+
+    back_cb = f"adm_u_ep_m:{title_id}:{parts[2]}:{parts[3]}:{parts[4]}" if is_ep else f"adm_u_m:{title_id}:{cat_id}"
+    keyboard.append([back_button(back_cb)])
+
+    await query.edit_message_text(
+        "🔗 *Add URL Combination (Step 1/2: Language)*\n\nChoose language for this combination:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def start_add_url_combo_res(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Step 2: Pick Resolution for new combo."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    is_ep = parts[0] == "adm_u_setlang_ep"
+    title_id = parts[1]
+
+    if is_ep:
+        season_id = parts[2]
+        episode_id = parts[3]
+        lang = parts[4]
+        cat_id = parts[5]
+    else:
+        lang = parts[2]
+        cat_id = parts[3]
+
+    resols = db.get_available_resolutions(only_enabled=True)
+    keyboard = []
+    for r in resols:
+        r_name = r.get("name", "Res")
+        if is_ep:
+            cb = f"adm_u_combo_v:{title_id}:{season_id}:{episode_id}:{lang}:{r_name}:{cat_id}"
+        else:
+            cb = f"adm_u_combo_v:{title_id}:{lang}:{r_name}:{cat_id}"
+
+        keyboard.append([InlineKeyboardButton(text=f"🎞️ {r_name}", callback_data=cb)])
+
+    keyboard.append([back_button("adm_dash")])
+    await query.edit_message_text(
+        f"🔗 *Add URL Combination (Step 2/2: Resolution)*\nLanguage: `{lang}`\n\nChoose resolution:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def start_url_add_watch_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for new Watch URL input."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+    await query.answer()
+
+    parts = query.data.split(":")
+    if len(parts) == 5:
+        # Normal: adm_u_aw:<title_id>:<lang>:<res>:<category_id>
+        context.user_data["add_url_title_id"] = parts[1]
+        context.user_data["add_url_lang"] = parts[2]
+        context.user_data["add_url_res"] = parts[3]
+        context.user_data["add_url_cat_id"] = parts[4]
+        context.user_data["add_url_season_id"] = None
+        context.user_data["add_url_episode_id"] = None
+    else:
+        # Episode: adm_u_aw:<title_id>:<season_id>:<episode_id>:<lang>:<res>:<category_id>
+        context.user_data["add_url_title_id"] = parts[1]
+        context.user_data["add_url_season_id"] = parts[2]
+        context.user_data["add_url_episode_id"] = parts[3]
+        context.user_data["add_url_lang"] = parts[4]
+        context.user_data["add_url_res"] = parts[5]
+        context.user_data["add_url_cat_id"] = parts[6]
+
+    context.user_data["add_url_type"] = "watch"
+
+    await query.edit_message_text(
+        "▶️ *Add Watch URL*\n\nEnter the streaming HTTPS URL (e.g. `https://stream.example.com/watch`):",
+        reply_markup=cancel_markup(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return STATE_URL_ADD_WATCH
+
+
+async def handle_url_add_watch_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    if not is_valid_url(text):
+        await update.message.reply_text("⚠️ Invalid URL. Must start with http:// or https://:")
+        return STATE_URL_ADD_WATCH
+
+    title_id = context.user_data.get("add_url_title_id")
+    lang = context.user_data.get("add_url_lang")
+    res = context.user_data.get("add_url_res")
+    s_id = context.user_data.get("add_url_season_id")
+    ep_id = context.user_data.get("add_url_episode_id")
+
+    db.add_media_url_link(
+        title_id=title_id,
+        language=lang,
+        resolution=res,
+        url=text,
+        url_type="watch",
+        season_id=s_id,
+        episode_id=ep_id,
+    )
+
+    await update.message.reply_text(
+        f"✅ *Watch URL Added!*\n`{text}`",
+        reply_markup=admin_dashboard_keyboard(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
+
+
+async def start_url_add_dl_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for new Download URL input."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+    await query.answer()
+
+    parts = query.data.split(":")
+    if len(parts) == 5:
+        context.user_data["add_url_title_id"] = parts[1]
+        context.user_data["add_url_lang"] = parts[2]
+        context.user_data["add_url_res"] = parts[3]
+        context.user_data["add_url_cat_id"] = parts[4]
+        context.user_data["add_url_season_id"] = None
+        context.user_data["add_url_episode_id"] = None
+    else:
+        context.user_data["add_url_title_id"] = parts[1]
+        context.user_data["add_url_season_id"] = parts[2]
+        context.user_data["add_url_episode_id"] = parts[3]
+        context.user_data["add_url_lang"] = parts[4]
+        context.user_data["add_url_res"] = parts[5]
+        context.user_data["add_url_cat_id"] = parts[6]
+
+    context.user_data["add_url_type"] = "download"
+
+    await query.edit_message_text(
+        "📥 *Add Download URL*\n\nEnter direct download HTTPS link (e.g. `https://files.example.com/download`):",
+        reply_markup=cancel_markup(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return STATE_URL_ADD_DOWNLOAD
+
+
+async def handle_url_add_dl_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    if not is_valid_url(text):
+        await update.message.reply_text("⚠️ Invalid URL. Must start with http:// or https://:")
+        return STATE_URL_ADD_DOWNLOAD
+
+    title_id = context.user_data.get("add_url_title_id")
+    lang = context.user_data.get("add_url_lang")
+    res = context.user_data.get("add_url_res")
+    s_id = context.user_data.get("add_url_season_id")
+    ep_id = context.user_data.get("add_url_episode_id")
+
+    db.add_media_url_link(
+        title_id=title_id,
+        language=lang,
+        resolution=res,
+        url=text,
+        url_type="download",
+        season_id=s_id,
+        episode_id=ep_id,
+    )
+
+    await update.message.reply_text(
+        f"✅ *Download URL Added!*\n`{text}`",
+        reply_markup=admin_dashboard_keyboard(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
+
+
+async def admin_url_delete_single(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete a single URL from watch/download list."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+
+    parts = query.data.split(":")
+    is_watch = parts[0] == "adm_u_dw"
+
+    if len(parts) == 6:
+        # Normal: adm_u_dw:<title_id>:<lang>:<res>:<idx>:<cat_id>
+        title_id = parts[1]
+        lang = parts[2]
+        res = parts[3]
+        idx = int(parts[4])
+        cat_id = parts[5]
+        combo = db.get_media_url_combo(title_id, language=lang, resolution=res) or {}
+        urls = combo.get("watch_urls" if is_watch else "download_urls", [])
+        if 0 <= idx < len(urls):
+            target_url = urls[idx]
+            db.remove_media_url_link(
+                title_id=title_id,
+                language=lang,
+                resolution=res,
+                url=target_url,
+                url_type="watch" if is_watch else "download",
+            )
+            await query.answer("URL deleted.")
+        query.data = f"adm_u_combo_v:{title_id}:{lang}:{res}:{cat_id}"
+    else:
+        # Episode: adm_u_dw:<title_id>:<season_id>:<episode_id>:<lang>:<res>:<idx>:<cat_id>
+        title_id = parts[1]
+        season_id = parts[2]
+        episode_id = parts[3]
+        lang = parts[4]
+        res = parts[5]
+        idx = int(parts[6])
+        cat_id = parts[7]
+        combo = (
+            db.get_media_url_combo(title_id, language=lang, resolution=res, season_id=season_id, episode_id=episode_id)
+            or {}
+        )
+        urls = combo.get("watch_urls" if is_watch else "download_urls", [])
+        if 0 <= idx < len(urls):
+            target_url = urls[idx]
+            db.remove_media_url_link(
+                title_id=title_id,
+                language=lang,
+                resolution=res,
+                url=target_url,
+                url_type="watch" if is_watch else "download",
+                season_id=season_id,
+                episode_id=episode_id,
+            )
+            await query.answer("URL deleted.")
+        query.data = f"adm_u_combo_v:{title_id}:{season_id}:{episode_id}:{lang}:{res}:{cat_id}"
+
+    await admin_url_combo_detail_view(update, context)
+
+
+async def admin_url_delete_combo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete entire combination."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+
+    parts = query.data.split(":")
+    if len(parts) == 5:
+        title_id = parts[1]
+        lang = parts[2]
+        res = parts[3]
+        cat_id = parts[4]
+        db.delete_media_combo(title_id, language=lang, resolution=res)
+        await query.answer("Combination deleted.")
+        query.data = f"adm_u_m:{title_id}:{cat_id}"
+    else:
+        title_id = parts[1]
+        season_id = parts[2]
+        episode_id = parts[3]
+        lang = parts[4]
+        res = parts[5]
+        cat_id = parts[6]
+        db.delete_media_combo(title_id, language=lang, resolution=res, season_id=season_id, episode_id=episode_id)
+        await query.answer("Combination deleted.")
+        query.data = f"adm_u_ep_m:{title_id}:{season_id}:{episode_id}:{cat_id}"
+
+    await admin_url_combos_view(update, context)
+
+
+# =========================================================================
+# 5. KEYWORDS MANAGEMENT
+# =========================================================================
+
+async def admin_keywords_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Keywords list for a title."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    cat_id = parts[2] if len(parts) >= 3 else ""
+
     title_doc = db.get_title(title_id)
     kws = title_doc.get("keywords", []) if title_doc else []
 
-    keyboard = [
-        [InlineKeyboardButton(text="➕ Add Keyword", callback_data=f"adm_kw_add:{title_id}")]
-    ]
-    for kw in kws:
-        keyboard.append([
-            InlineKeyboardButton(text=f"🗑️ Remove: '{kw}'", callback_data=f"adm_kw_rm:{title_id}:{kw}")
-        ])
-    keyboard.append([back_button(f"adm_t_v:{title_id}")])
-
+    markup = admin_keywords_keyboard(title_id=title_id, category_id=cat_id, keywords=kws)
     await query.edit_message_text(
         f"🏷️ *Keywords for:* `{title_doc.get('title') if title_doc else 'Title'}`\n\n"
         f"Current: {', '.join(kws) if kws else 'None'}",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN,
     )
-
-
-async def admin_kw_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove keyword callback."""
-    query = update.callback_query
-    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-    parts = query.data.split(":")
-    title_id = parts[1]
-    kw = parts[2]
-    db.remove_keyword(title_id, kw)
-    await query.answer(f"Removed keyword '{kw}'.")
-    query.data = f"adm_t_kw:{title_id}"
-    await admin_title_keywords_menu(update, context)
 
 
 async def start_kw_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
     await query.answer()
-    title_id = query.data.split(":")[1]
-    context.user_data["kw_title_id"] = title_id
+
+    parts = query.data.split(":")
+    context.user_data["kw_title_id"] = parts[1]
+    context.user_data["kw_cat_id"] = parts[2] if len(parts) >= 3 else ""
+
     await query.edit_message_text(
-        "🏷️ *Add Keyword*\n\nEnter search keywords (comma-separated or single word):",
-        reply_markup=cancel_button_markup(),
+        "🏷️ *Add Search Keywords*\n\nEnter keywords (comma-separated or single word):",
+        reply_markup=cancel_markup(),
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_KW_ADD
@@ -599,12 +1203,130 @@ async def handle_kw_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
     for item in text.split(","):
-        clean_kw = item.strip()
-        if clean_kw:
-            db.add_keyword(title_id, clean_kw)
+        kw = item.strip()
+        if kw:
+            db.add_keyword(title_id, kw)
 
     await update.message.reply_text(
-        f"✅ Keywords added successfully.",
+        "✅ Keywords added successfully.",
+        reply_markup=admin_dashboard_keyboard(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
+
+
+async def admin_kw_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+
+    parts = query.data.split(":")
+    title_id = parts[1]
+    kw = parts[2]
+    cat_id = parts[3] if len(parts) >= 4 else ""
+
+    db.remove_keyword(title_id, kw)
+    await query.answer(f"Removed '{kw}'.")
+    query.data = f"adm_kw_m:{title_id}:{cat_id}"
+    await admin_keywords_view(update, context)
+
+
+# =========================================================================
+# 6. USER REQUESTS & STATS & BROADCAST
+# =========================================================================
+
+async def admin_requests_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View latest user requests logged in Firestore."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    reqs = db.get_recent_requests(limit=15)
+    if not reqs:
+        text = "📩 *User Media Requests*\n\nNo pending requests recorded."
+    else:
+        lines = []
+        for r in reqs:
+            u_name = r.get("username") or r.get("first_name", "User")
+            r_text = r.get("request_text", "")
+            lines.append(f"• *{u_name}:* `{r_text}`")
+        text = "📩 *Recent User Media Requests:*\n\n" + "\n".join(lines)
+
+    markup = InlineKeyboardMarkup([[back_button("adm_dash")]])
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+
+async def admin_stats_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View bot usage statistics."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    total_users = db.get_total_users()
+    top_kws = db.get_top_searched_keywords(limit=8)
+    kw_lines = [f"{i+1}. `{k['keyword']}` ({k['count']} searches)" for i, k in enumerate(top_kws)]
+    kw_str = "\n".join(kw_lines) or "No search history recorded yet."
+
+    text = (
+        "📊 *Bot Analytics & Statistics*\n\n"
+        f"👥 *Total Registered Members:* `{total_users}`\n\n"
+        f"🔥 *Top Searched Queries:*\n{kw_str}"
+    )
+    markup = admin_stats_keyboard()
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+
+async def admin_users_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Users overview & broadcast trigger."""
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await query.answer()
+
+    total = db.get_total_users()
+    markup = admin_users_keyboard(total)
+    await query.edit_message_text(
+        f"👥 *Users Overview*\n\nTotal registered members: `{total}`",
+        reply_markup=markup,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+    await query.answer()
+
+    await query.edit_message_text(
+        "📢 *Broadcast Message to All Users*\n\nSend the message text you wish to broadcast:",
+        reply_markup=cancel_markup(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return STATE_BROADCAST_MSG
+
+
+async def handle_broadcast_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text
+    if not text:
+        return STATE_BROADCAST_MSG
+
+    status = await update.message.reply_text("⏳ *Broadcasting message...*", parse_mode=ParseMode.MARKDOWN)
+    success, fail = 0, 0
+
+    for user_doc in db.users_col.stream():
+        uid = (user_doc.to_dict() or {}).get("user_id")
+        if uid:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.MARKDOWN)
+                success += 1
+            except Exception:
+                fail += 1
+
+    await status.edit_text(
+        f"📢 *Broadcast Complete!*\n\n✅ Delivered: `{success}`\n❌ Failed: `{fail}`",
         reply_markup=admin_dashboard_keyboard(),
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -612,11 +1334,10 @@ async def handle_kw_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # =========================================================================
-# LANGUAGES MANAGEMENT
+# 7. LANGUAGES & RESOLUTIONS
 # =========================================================================
 
 async def admin_languages_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manage supported languages."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
@@ -625,17 +1346,17 @@ async def admin_languages_list(update: Update, context: ContextTypes.DEFAULT_TYP
     langs = db.get_available_languages(only_enabled=False)
     markup = admin_languages_keyboard(langs)
     await query.edit_message_text(
-        "🗣️ *Language Management*\n\nConfigure available audio/subtitle languages:",
+        "🌐 *Language Management*\n\nConfigure available languages:",
         reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def admin_lang_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle language active state."""
     query = update.callback_query
-    if not query:
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
+
     lang_id = query.data.split(":")[1]
     doc = db.languages_col.document(lang_id).get()
     if doc.exists:
@@ -647,10 +1368,13 @@ async def admin_lang_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def start_lang_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
     await query.answer()
+
     await query.edit_message_text(
-        "➕ *Add New Language*\n\nEnter language name (e.g. `Hindi`, `English`, `Dual Audio`, `Japanese`):",
-        reply_markup=cancel_button_markup(),
+        "➕ *Add New Language*\n\nEnter language name (e.g. `Hindi`, `English`, `Japanese`):",
+        reply_markup=cancel_markup(),
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_LANG_ADD
@@ -669,12 +1393,7 @@ async def handle_lang_add_input(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
-# =========================================================================
-# RESOLUTIONS MANAGEMENT
-# =========================================================================
-
 async def admin_resolutions_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manage supported resolutions."""
     query = update.callback_query
     if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
@@ -683,17 +1402,17 @@ async def admin_resolutions_list(update: Update, context: ContextTypes.DEFAULT_T
     resols = db.get_available_resolutions(only_enabled=False)
     markup = admin_resolutions_keyboard(resols)
     await query.edit_message_text(
-        "📺 *Resolution Management*\n\nConfigure quality options (480p, 720p, 1080p, 4K):",
+        "🎞️ *Resolution Management*\n\nConfigure quality options (480p, 720p, 1080p, 4K):",
         reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def admin_res_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle resolution active state."""
     query = update.callback_query
-    if not query:
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
         return
+
     res_id = query.data.split(":")[1]
     doc = db.resolutions_col.document(res_id).get()
     if doc.exists:
@@ -705,10 +1424,13 @@ async def admin_res_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def start_res_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
     await query.answer()
+
     await query.edit_message_text(
-        "➕ *Add New Quality / Resolution*\n\nEnter resolution name (e.g. `480p`, `720p HD`, `1080p FHD`, `4K UHD`):",
-        reply_markup=cancel_button_markup(),
+        "➕ *Add Resolution Quality*\n\nEnter resolution name (e.g. `480p`, `720p HD`, `1080p FHD`, `4K UHD`):",
+        reply_markup=cancel_markup(),
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_RES_ADD
@@ -728,378 +1450,23 @@ async def handle_res_add_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # =========================================================================
-# URL MANAGER (Category -> Title -> Language -> Resolution -> Links)
+# 8. HELP TEXT EDITOR
 # =========================================================================
 
-async def admin_url_manager_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Step 1: Select Category for URL Manager."""
-    query = update.callback_query
-    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-    await query.answer()
-
-    cats = db.get_all_categories()
-    keyboard = []
-    for c in cats:
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"📁 {c.get('name')}",
-                callback_data=f"adm_u_cat:{c.get('id')}",
-            )
-        ])
-    keyboard.append([back_button("adm_dash")])
-
-    await query.edit_message_text(
-        "🔗 *URL Manager (Step 1/4)*\n\nSelect category to locate the title:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def admin_u_cat_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Step 2: Select Title in Category."""
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-
-    cat_id = query.data.split(":")[1]
-    titles = db.get_titles_by_category(cat_id, limit=50)
-
-    keyboard = []
-    for t in titles:
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"🎬 {t.get('title')}",
-                callback_data=f"adm_u_m:{t.get('id')}",
-            )
-        ])
-    keyboard.append([back_button("adm_urls", label="⬅️ Back to Categories")])
-
-    await query.edit_message_text(
-        "🔗 *URL Manager (Step 2/4)*\n\nSelect Title to manage URL combinations:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def admin_url_combinations_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Step 3: View & Add URL combinations for selected title."""
-    query = update.callback_query
-    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-    await query.answer()
-
-    title_id = query.data.split(":")[1]
-    title_doc = db.get_title(title_id)
-    if not title_doc:
-        await query.edit_message_text("⚠️ Title not found.", reply_markup=admin_dashboard_keyboard())
-        return
-
-    media_items = db.get_media_urls_for_title(title_id)
-    markup = admin_url_manager_keyboard(title_id, media_items)
-
-    await query.edit_message_text(
-        f"🔗 *URL Combinations for:* `{title_doc.get('title')}`\n\n"
-        f"Configured combinations ({len(media_items)}):\n"
-        "Tap a combination to view or edit URLs, or tap **➕ Add URL Combination**:",
-        reply_markup=markup,
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def admin_url_combo_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View single combination details (Watch & Download URLs)."""
-    query = update.callback_query
-    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-    await query.answer()
-
-    parts = query.data.split(":")
-    title_id = parts[1]
-    combo_id = parts[2]
-
-    doc = db.titles_col.document(title_id).collection("media_items").document(combo_id).get()
-    if not doc.exists:
-        await query.edit_message_text("⚠️ Combination not found.")
-        return
-
-    data = doc.to_dict() or {}
-    watch_url = data.get("watch_url", "")
-    download_url = data.get("download_url", "")
-
-    text = (
-        f"🔗 *Combination Details*\n"
-        f"• Language: `{data.get('language')}`\n"
-        f"• Resolution: `{data.get('resolution')}`\n\n"
-        f"▶️ *Watch URL:* `{watch_url or 'Not set'}`\n"
-        f"📥 *Download URL:* `{download_url or 'Not set'}`"
-    )
-    markup = admin_media_item_detail_keyboard(
-        title_id=title_id,
-        combo_id=combo_id,
-        watch_url=watch_url,
-        download_url=download_url,
-    )
-    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
-
-
-async def admin_url_combo_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete a URL combination."""
-    query = update.callback_query
-    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-    parts = query.data.split(":")
-    title_id = parts[1]
-    combo_id = parts[2]
-
-    db.titles_col.document(title_id).collection("media_items").document(combo_id).delete()
-    await query.answer("Combination deleted successfully.")
-    query.data = f"adm_u_m:{title_id}"
-    await admin_url_combinations_view(update, context)
-
-
-# Add URL Combination Wizard (Select Language -> Select Resolution -> Input URLs)
-async def admin_u_add_step1_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Pick Language for new URL combination."""
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-
-    title_id = query.data.split(":")[1]
-    langs = db.get_available_languages(only_enabled=True)
-
-    keyboard = []
-    for l in langs:
-        l_name = l.get("name", "Lang")
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"🗣️ {l_name}",
-                callback_data=f"adm_u_setlang:{title_id}:{l_name}",
-            )
-        ])
-    keyboard.append([back_button(f"adm_u_m:{title_id}")])
-
-    await query.edit_message_text(
-        "🔗 *Add URL Combination (Step 1/2: Language)*\n\nChoose audio/subtitle language for this link:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def admin_u_add_step2_res(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Pick Resolution for new URL combination."""
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-
-    parts = query.data.split(":")
-    title_id = parts[1]
-    lang = parts[2]
-
-    resols = db.get_available_resolutions(only_enabled=True)
-    keyboard = []
-    for r in resols:
-        r_name = r.get("name", "Res")
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"📺 {r_name}",
-                callback_data=f"adm_u_setres:{title_id}:{lang}:{r_name}",
-            )
-        ])
-    keyboard.append([back_button(f"adm_u_add:{title_id}")])
-
-    await query.edit_message_text(
-        f"🔗 *Add URL Combination (Step 2/2: Resolution)*\n"
-        f"Language selected: `{lang}`\n\nChoose video resolution quality:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def start_url_watch_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Prompt for Watch URL input."""
-    query = update.callback_query
-    await query.answer()
-
-    parts = query.data.split(":")
-    if parts[0] == "adm_u_setres":
-        # New combination creation
-        context.user_data["url_title_id"] = parts[1]
-        context.user_data["url_lang"] = parts[2]
-        context.user_data["url_res"] = parts[3]
-    elif parts[0] == "adm_u_ew":
-        # Edit existing Watch URL
-        title_id = parts[1]
-        combo_id = parts[2]
-        doc = db.titles_col.document(title_id).collection("media_items").document(combo_id).get()
-        if doc.exists:
-            d = doc.to_dict() or {}
-            context.user_data["url_title_id"] = title_id
-            context.user_data["url_lang"] = d.get("language")
-            context.user_data["url_res"] = d.get("resolution")
-
-    await query.edit_message_text(
-        "▶️ *Input Watch URL (Online Streaming Link)*\n\n"
-        "Send the direct HTTPS streaming / watch URL (or send `-` to skip Watch URL):",
-        reply_markup=cancel_button_markup(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    return STATE_URL_WATCH_INPUT
-
-
-async def handle_url_watch_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = (update.message.text or "").strip()
-    if text != "-" and not is_valid_url(text):
-        await update.message.reply_text("⚠️ Invalid URL format. Must start with http:// or https:// (or send `-` to skip):")
-        return STATE_URL_WATCH_INPUT
-
-    context.user_data["watch_url_val"] = "" if text == "-" else text
-    await update.message.reply_text(
-        "📥 *Input Download URL*\n\n"
-        "Send the direct HTTPS download URL (or send `-` to skip Download URL):",
-        reply_markup=cancel_button_markup(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    return STATE_URL_DOWNLOAD_INPUT
-
-
-async def handle_url_download_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = (update.message.text or "").strip()
-    if text != "-" and not is_valid_url(text):
-        await update.message.reply_text("⚠️ Invalid URL format. Must start with http:// or https:// (or send `-` to skip):")
-        return STATE_URL_DOWNLOAD_INPUT
-
-    download_val = "" if text == "-" else text
-    watch_val = context.user_data.get("watch_url_val", "")
-
-    title_id = context.user_data.get("url_title_id")
-    lang = context.user_data.get("url_lang")
-    res = context.user_data.get("url_res")
-
-    if not title_id or not lang or not res:
-        await update.message.reply_text("⚠️ Session expired. Please retry from URL Manager.")
-        return ConversationHandler.END
-
-    db.set_media_url(
-        title_id=title_id,
-        language=lang,
-        resolution=res,
-        watch_url=watch_val,
-        download_url=download_val,
-    )
-
-    await update.message.reply_text(
-        f"✅ *Media Combination Saved!*\n\n"
-        f"• Language: `{lang}`\n"
-        f"• Quality: `{res}`\n"
-        f"• Watch URL: `{watch_val or 'None'}`\n"
-        f"• Download URL: `{download_val or 'None'}`",
-        reply_markup=admin_dashboard_keyboard(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    return ConversationHandler.END
-
-
-# =========================================================================
-# USERS & STATISTICS
-# =========================================================================
-
-async def admin_stats_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View bot usage statistics and popular search queries."""
-    query = update.callback_query
-    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-    await query.answer()
-
-    total_users = db.get_total_users()
-    top_kws = db.get_top_searched_keywords(limit=8)
-    kw_lines = []
-    for idx, item in enumerate(top_kws, 1):
-        kw_lines.append(f"{idx}. `{item['keyword']}` ({item['count']} searches)")
-    kw_str = "\n".join(kw_lines) or "No search history recorded yet."
-
-    text = (
-        "📊 *Bot Analytics & Statistics*\n\n"
-        f"👥 *Total Registered Users:* `{total_users}`\n\n"
-        f"🔥 *Top Searched Queries:*\n{kw_str}"
-    )
-    markup = admin_stats_keyboard()
-    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
-
-
-async def admin_users_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View registered users overview."""
-    query = update.callback_query
-    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
-        return
-    await query.answer()
-
-    total = db.get_total_users()
-    markup = admin_users_keyboard(total)
-    await query.edit_message_text(
-        f"👥 *Users Management*\n\nTotal registered members: `{total}`",
-        reply_markup=markup,
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-# Broadcast message flow
-async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "📢 *Broadcast Announcement*\n\n"
-        "Send the message text you wish to broadcast to all registered users:",
-        reply_markup=cancel_button_markup(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    return STATE_BROADCAST_INPUT
-
-
-async def handle_broadcast_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = update.message.text
-    if not text:
-        return STATE_BROADCAST_INPUT
-
-    status_msg = await update.message.reply_text("⏳ *Broadcasting message...*", parse_mode=ParseMode.MARKDOWN)
-    success_count = 0
-    fail_count = 0
-
-    for user_doc in db.users_col.stream():
-        u_data = user_doc.to_dict()
-        uid = u_data.get("user_id")
-        if uid:
-            try:
-                await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.MARKDOWN)
-                success_count += 1
-            except Exception:
-                fail_count += 1
-
-    await status_msg.edit_text(
-        f"📢 *Broadcast Complete!*\n\n"
-        f"✅ Delivered: `{success_count}`\n"
-        f"❌ Failed: `{fail_count}`",
-        reply_markup=admin_dashboard_keyboard(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    return ConversationHandler.END
-
-
-# Help Text Editor Flow
 async def start_help_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    if not query or not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
     await query.answer()
+
     curr_help = db.get_help_text()
     await query.edit_message_text(
-        f"📝 *Edit Bot Help Text*\n\nCurrent help text:\n_{curr_help}_\n\n"
-        "Send the new formatted Markdown help text:",
-        reply_markup=cancel_button_markup(),
+        f"📝 *Edit Bot Help Guide*\n\nCurrent help text:\n_{curr_help}_\n\n"
+        "Send the new formatted Markdown text:",
+        reply_markup=cancel_markup(),
         parse_mode=ParseMode.MARKDOWN,
     )
-    return STATE_SETTINGS_HELP_EDIT
+    return STATE_HELP_EDIT
 
 
 async def handle_help_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1107,7 +1474,7 @@ async def handle_help_edit_input(update: Update, context: ContextTypes.DEFAULT_T
     if text:
         db.set_help_text(text)
         await update.message.reply_text(
-            "✅ *Help text updated successfully.*",
+            "✅ Help guide updated successfully.",
             reply_markup=admin_dashboard_keyboard(),
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -1115,7 +1482,7 @@ async def handle_help_edit_input(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # =========================================================================
-# ADMIN CONVERSATION & HANDLER REGISTRATION
+# HANDLER REGISTRATION
 # =========================================================================
 
 def register_admin_handlers(app: Application) -> None:
@@ -1128,11 +1495,14 @@ def register_admin_handlers(app: Application) -> None:
             CallbackQueryHandler(start_cat_add, pattern="^adm_cat_add$"),
             CallbackQueryHandler(start_cat_edit, pattern="^adm_cat_e:"),
             CallbackQueryHandler(start_cat_order, pattern="^adm_cat_o:"),
-            CallbackQueryHandler(start_title_add, pattern="^adm_title_add$"),
+            CallbackQueryHandler(start_title_add, pattern="^adm_t_add:"),
+            CallbackQueryHandler(start_season_add, pattern="^adm_s_add:"),
+            CallbackQueryHandler(start_episode_add, pattern="^adm_ep_add:"),
             CallbackQueryHandler(start_kw_add, pattern="^adm_kw_add:"),
+            CallbackQueryHandler(start_url_add_watch_prompt, pattern="^adm_u_aw:"),
+            CallbackQueryHandler(start_url_add_dl_prompt, pattern="^adm_u_adl:"),
             CallbackQueryHandler(start_lang_add, pattern="^adm_lang_add$"),
             CallbackQueryHandler(start_res_add, pattern="^adm_res_add$"),
-            CallbackQueryHandler(start_url_watch_input, pattern="^(adm_u_setres|adm_u_ew):"),
             CallbackQueryHandler(start_broadcast, pattern="^adm_broadcast$"),
             CallbackQueryHandler(start_help_edit, pattern="^adm_help_edit$"),
         ],
@@ -1140,59 +1510,84 @@ def register_admin_handlers(app: Application) -> None:
             STATE_CAT_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cat_add_input)],
             STATE_CAT_EDIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cat_edit_input)],
             STATE_CAT_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cat_order_input)],
-            STATE_TITLE_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_add_name)],
-            STATE_TITLE_ADD_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_add_desc)],
-            STATE_TITLE_ADD_YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_add_year)],
+            STATE_TITLE_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_add_name_input)],
+            STATE_TITLE_ADD_TYPE: [CallbackQueryHandler(handle_title_add_type_callback, pattern="^set_type_")],
+            STATE_SEASON_ADD_NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_season_add_num)],
+            STATE_SEASON_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_season_add_name)],
+            STATE_EPISODE_ADD_NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_episode_add_num)],
+            STATE_EPISODE_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_episode_add_name)],
             STATE_KW_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_kw_add_input)],
             STATE_LANG_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_lang_add_input)],
             STATE_RES_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_res_add_input)],
-            STATE_URL_WATCH_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_watch_input)],
-            STATE_URL_DOWNLOAD_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_download_input)],
-            STATE_BROADCAST_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_input)],
-            STATE_SETTINGS_HELP_EDIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_help_edit_input)],
+            STATE_URL_ADD_WATCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_add_watch_input)],
+            STATE_URL_ADD_DOWNLOAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_add_dl_input)],
+            STATE_BROADCAST_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_input)],
+            STATE_HELP_EDIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_help_edit_input)],
         },
         fallbacks=[
-            CommandHandler("cancel", cancel_command),
-            CallbackQueryHandler(cancel_command, pattern="^adm_cancel_state$"),
-            CallbackQueryHandler(admin_command, pattern="^adm_dash$"),
+            CommandHandler("cancel", cancel_admin_state),
+            CallbackQueryHandler(cancel_admin_state, pattern="^adm_cancel$"),
         ],
-        allow_reentry=True,
+        per_chat=True,
     )
-
     app.add_handler(admin_conv)
 
-    # Categories callbacks
+    # Categories management callbacks
     app.add_handler(CallbackQueryHandler(admin_categories_list, pattern="^adm_cats"))
     app.add_handler(CallbackQueryHandler(admin_cat_view, pattern="^adm_cat_v:"))
     app.add_handler(CallbackQueryHandler(admin_cat_toggle, pattern="^adm_cat_t:"))
     app.add_handler(CallbackQueryHandler(admin_cat_delete, pattern="^adm_cat_d:"))
 
-    # Titles callbacks
-    app.add_handler(CallbackQueryHandler(admin_titles_list, pattern="^adm_titles"))
-    app.add_handler(CallbackQueryHandler(admin_title_view, pattern="^adm_t_v:"))
+    # Category-First Titles callbacks
+    app.add_handler(CallbackQueryHandler(admin_titles_category_picker, pattern="^adm_titles_cat$"))
+    app.add_handler(CallbackQueryHandler(admin_titles_in_category_view, pattern="^adm_t_cat_pick:"))
+    app.add_handler(CallbackQueryHandler(admin_title_detail_view, pattern="^adm_t_v:"))
     app.add_handler(CallbackQueryHandler(admin_title_toggle_pub, pattern="^adm_t_pub:"))
+    app.add_handler(CallbackQueryHandler(admin_title_switch_type, pattern="^adm_t_sw_type:"))
     app.add_handler(CallbackQueryHandler(admin_title_delete, pattern="^adm_t_del:"))
-    app.add_handler(CallbackQueryHandler(admin_title_assign_cats, pattern="^adm_t_cat:"))
-    app.add_handler(CallbackQueryHandler(admin_title_keywords_menu, pattern="^adm_t_kw:"))
+
+    # Seasons & Episodes callbacks
+    app.add_handler(CallbackQueryHandler(admin_seasons_list, pattern="^adm_s_list:"))
+    app.add_handler(CallbackQueryHandler(admin_season_view, pattern="^adm_s_v:"))
+    app.add_handler(CallbackQueryHandler(admin_season_delete, pattern="^adm_s_del:"))
+    app.add_handler(CallbackQueryHandler(admin_episode_view, pattern="^adm_ep_v:"))
+    app.add_handler(CallbackQueryHandler(admin_episode_delete, pattern="^adm_ep_del:"))
+
+    # URL Manager & Combinations callbacks
+    app.add_handler(
+        CallbackQueryHandler(
+            lambda u, c: admin_titles_category_picker(
+                type("Obj", (object,), {"callback_query": u.callback_query})(), c
+            ),
+            pattern="^adm_urls_cat$",
+        )
+    )
+    app.add_handler(CallbackQueryHandler(admin_url_combos_view, pattern="^(adm_u_m|adm_u_ep_m|adm_u_s_m):"))
+    app.add_handler(CallbackQueryHandler(admin_url_combo_detail_view, pattern="^adm_u_combo_v:"))
+    app.add_handler(CallbackQueryHandler(start_add_url_combo_lang, pattern="^(adm_u_add|adm_u_add_ep):"))
+    app.add_handler(CallbackQueryHandler(start_add_url_combo_res, pattern="^(adm_u_setlang|adm_u_setlang_ep):"))
+    app.add_handler(CallbackQueryHandler(admin_url_delete_single, pattern="^(adm_u_dw|adm_u_ddl):"))
+    app.add_handler(CallbackQueryHandler(admin_url_delete_combo, pattern="^adm_u_cdel:"))
+
+    # Keywords callbacks
+    app.add_handler(
+        CallbackQueryHandler(
+            lambda u, c: admin_titles_category_picker(
+                type("Obj", (object,), {"callback_query": u.callback_query})(), c
+            ),
+            pattern="^adm_kws_cat$",
+        )
+    )
+    app.add_handler(CallbackQueryHandler(admin_keywords_view, pattern="^adm_kw_m:"))
     app.add_handler(CallbackQueryHandler(admin_kw_remove, pattern="^adm_kw_rm:"))
 
-    # Languages callbacks
-    app.add_handler(CallbackQueryHandler(admin_languages_list, pattern="^adm_langs$"))
-    app.add_handler(CallbackQueryHandler(admin_lang_toggle, pattern="^adm_lang_v:"))
-
-    # Resolutions callbacks
-    app.add_handler(CallbackQueryHandler(admin_resolutions_list, pattern="^adm_resols$"))
-    app.add_handler(CallbackQueryHandler(admin_res_toggle, pattern="^adm_res_v:"))
-
-    # URL Manager callbacks
-    app.add_handler(CallbackQueryHandler(admin_url_manager_entry, pattern="^adm_urls$"))
-    app.add_handler(CallbackQueryHandler(admin_u_cat_selected, pattern="^adm_u_cat:"))
-    app.add_handler(CallbackQueryHandler(admin_url_combinations_view, pattern="^adm_u_m:"))
-    app.add_handler(CallbackQueryHandler(admin_url_combo_detail, pattern="^adm_u_v:"))
-    app.add_handler(CallbackQueryHandler(admin_url_combo_delete, pattern="^adm_u_del:"))
-    app.add_handler(CallbackQueryHandler(admin_u_add_step1_lang, pattern="^adm_u_add:"))
-    app.add_handler(CallbackQueryHandler(admin_u_add_step2_res, pattern="^adm_u_setlang:"))
-
-    # Users & Stats callbacks
+    # Requests, Stats & Users callbacks
+    app.add_handler(CallbackQueryHandler(admin_requests_view, pattern="^adm_reqs$"))
     app.add_handler(CallbackQueryHandler(admin_stats_view, pattern="^adm_stats"))
     app.add_handler(CallbackQueryHandler(admin_users_view, pattern="^adm_users$"))
+
+    # Languages & Resolutions callbacks
+    app.add_handler(CallbackQueryHandler(admin_languages_list, pattern="^adm_langs$"))
+    app.add_handler(CallbackQueryHandler(admin_lang_toggle, pattern="^adm_lang_t:"))
+    app.add_handler(CallbackQueryHandler(admin_resolutions_list, pattern="^adm_resols$"))
+    app.add_handler(CallbackQueryHandler(admin_res_toggle, pattern="^adm_res_t:"))
